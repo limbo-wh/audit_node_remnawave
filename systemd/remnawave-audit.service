@@ -1,0 +1,16 @@
+[Unit]
+Description=Remnawave node audit (one-shot run)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=__SCRIPT_DIR__/audit.sh --once
+# audit.sh exit codes: 0=ок, 1=warning, 2=critical, 3=скрипт сломан.
+# 1 и 2 — это «нормальные» исходы (алерты есть, но скрипт отработал штатно).
+# Только 3 считаем настоящим failure для systemd.
+SuccessExitStatus=0 1 2
+TimeoutStartSec=120
+Nice=10
+StandardOutput=journal
+StandardError=journal

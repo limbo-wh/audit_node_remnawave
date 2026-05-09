@@ -1,0 +1,12 @@
+# Bash-скрипты должны быть с LF (даже если репо клонируется на Windows)
+*.sh text eol=lf
+*.bash text eol=lf
+
+# systemd unit'ы тоже LF
+*.service text eol=lf
+*.timer text eol=lf
+
+# Документация — пусть будет в нативном формате системы
+*.md text
+*.yml text
+*.yaml text

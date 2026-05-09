@@ -1,0 +1,12 @@
+[Unit]
+Description=Remnawave node audit daily summary timer
+
+[Timer]
+# OnCalendar с TZ-suffix (systemd 233+) корректно обрабатывает DST:
+# систему не нужно пересчитывать дважды в год.
+OnCalendar=*-*-* 08:00:00 __TZ__
+Persistent=true
+RandomizedDelaySec=2m
+
+[Install]
+WantedBy=timers.target

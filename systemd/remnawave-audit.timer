@@ -1,0 +1,12 @@
+[Unit]
+Description=Remnawave node audit timer (every 2 minutes)
+Requires=remnawave-audit.service
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=120
+AccuracySec=10s
+RandomizedDelaySec=15
+
+[Install]
+WantedBy=timers.target

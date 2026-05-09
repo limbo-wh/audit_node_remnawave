@@ -1,0 +1,24 @@
+# Секреты и состояние — НИКОГДА не коммитим (живут только на нодах в /etc и /var)
+audit.conf
+*.conf.local
+state.json
+queue/
+backup/
+*.log
+.env
+.env.*
+
+# IDE / harness
+.claude/
+.idea/
+.vscode/
+
+# OS / temporary
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Build artefacts
+*.tar.gz
+dist/

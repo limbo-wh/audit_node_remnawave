@@ -1,0 +1,12 @@
+[Unit]
+Description=Remnawave node audit (daily summary)
+After=docker.service
+
+[Service]
+Type=oneshot
+Environment=TZ=__TZ__
+ExecStart=__SCRIPT_DIR__/audit.sh --daily-summary
+TimeoutStartSec=300
+Nice=10
+StandardOutput=journal
+StandardError=journal
