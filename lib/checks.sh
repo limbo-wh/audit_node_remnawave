@@ -158,7 +158,8 @@ check_network_panel_link() {
   prev_zero_since="$(state_get_int "network_panel_link_zero_since" 0)"
 
   if (( est == 0 )); then
-    local now=$(date +%s)
+    local now
+    now=$(date +%s)
     if (( prev_zero_since == 0 )); then
       state_set "network_panel_link_zero_since" "$now"
     elif (( now - prev_zero_since >= 300 )); then

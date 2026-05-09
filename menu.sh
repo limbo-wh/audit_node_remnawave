@@ -11,7 +11,8 @@ IFS=$'\n\t'
 # readlink -f нужен потому что menu.sh обычно запускается через симлинк
 # /usr/local/bin/remnawave-audit → /opt/remnawave-audit/menu.sh, и без resolve
 # SCRIPT_DIR будет /usr/local/bin/, а audit.sh там нет.
-readonly SCRIPT_DIR="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SCRIPT_DIR="$(cd -P "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+readonly SCRIPT_DIR
 readonly AUDIT_SH="${SCRIPT_DIR}/audit.sh"
 readonly INSTALL_SH="${SCRIPT_DIR}/install.sh"
 readonly UNINSTALL_SH="${SCRIPT_DIR}/uninstall.sh"
@@ -27,10 +28,10 @@ fi
 # --- ANSI-цвета ---
 if [[ -t 1 ]]; then
   C_RED=$'\033[31m'   C_GRN=$'\033[32m'   C_YLW=$'\033[33m'
-  C_BLU=$'\033[34m'   C_CYN=$'\033[36m'   C_DIM=$'\033[2m'
+  C_CYN=$'\033[36m'   C_DIM=$'\033[2m'
   C_BLD=$'\033[1m'    C_RST=$'\033[0m'
 else
-  C_RED="" C_GRN="" C_YLW="" C_BLU="" C_CYN="" C_DIM="" C_BLD="" C_RST=""
+  C_RED="" C_GRN="" C_YLW="" C_CYN="" C_DIM="" C_BLD="" C_RST=""
 fi
 
 # --- Helpers ---

@@ -6,11 +6,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly VERSION="1.0.0"
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 readonly LIB_DIR="${SCRIPT_DIR}/lib"
 readonly CONFIG_PATH="${REMNAWAVE_AUDIT_CONFIG:-/etc/remnawave-audit/audit.conf}"
 readonly STATE_DIR="/var/lib/remnawave-audit"
-# shellcheck disable=SC2034  # LOG_DIR used in lib/notify.sh and lib/util.sh (cross-file)
 readonly LOG_DIR="/var/log/remnawave-audit"
 readonly LOCK_FILE="/run/remnawave-audit.lock"
 readonly LOCK_FILE_FALLBACK="/var/run/remnawave-audit.lock"
@@ -35,7 +35,7 @@ trap 'on_exit' EXIT
 
 DRY_RUN=0
 ONCE=0
-DEBUG=0
+export DEBUG=0  # читается в lib/util.sh::log_debug — export подавляет SC2034
 ACTION="run"
 EXIT_CODE=0
 AUTO_RECOVER_FLAG=0
@@ -213,6 +213,7 @@ auto_recover_if_needed() {
 # --diagnose: запускает все проверки, печатает в stdout (включая OK),
 # state не модифицируется, в Telegram НЕ отправляет ничего.
 run_diagnose() {
+  # shellcheck disable=SC2034  # читается в lib/state.sh — отключает запись в state
   STATE_READONLY=1
   local results
   results="$(checks_run_all)"
@@ -231,6 +232,7 @@ run_diagnose() {
 
 # --health: печатает JSON со статусом последнего прогона. Для внешнего watchdog.
 action_health() {
+  # shellcheck disable=SC2034  # читается в lib/state.sh — отключает запись в state
   STATE_READONLY=1
   local last_run last_status n_crit n_warn active queue ts ufw f2b uu
   last_run="$(state_get_int "last_run_unix" 0)"
@@ -373,8 +375,8 @@ action_daily_summary() {
   notify_init
 
   local ip uptime_h started uptime_c restarts sess_443 sess_8388
-  local disk_root disk_pct ram_pct la cert_days reboot_req
-  local img_id ufw_st f2b_st uu_st crit_24h warn_24h since
+  local disk_pct ram_pct la cert_days reboot_req
+  local ufw_st f2b_st uu_st crit_24h warn_24h since
   ip="$(state_get "network_external_ip" "?")"
 
   # Uptime контейнера
@@ -448,6 +450,7 @@ action_daily_summary() {
   local body
   body="$(cat <<EOF
 Контейнер remnanode: running ${uptime_c}, рестартов: ${restarts}
+Внешний IP: ${ip}
 Сессий: :443=${sess_443}, :8388=${sess_8388}
 Диск /: ${disk_pct} | RAM: ${ram_pct:-?} | LA: ${la}
 Сертификат ноды: ${cert_days} дн. до истечения
