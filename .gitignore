@@ -12,6 +12,7 @@ backup/
 .claude/
 .idea/
 .vscode/
+.stack/
 
 # OS / temporary
 .DS_Store

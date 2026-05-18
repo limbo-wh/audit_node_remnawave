@@ -510,13 +510,16 @@ check_security_failed_ssh() {
   count="$(printf '%s\n' "$filtered" | grep -c . || true)"
   count="${count:-0}"
   if (( count > 30 )); then
-    # awk вытаскивает IP после слова "from"; sort | uniq -c | sort -rn → топ-3.
+    # grep -oE извлекает IP сразу после "from" — надёжнее чем awk-поле,
+    # работает на всех форматах journalctl (short/short-precise/cat).
+    # NF==2 в финальном awk отбрасывает мусорные строки uniq -c.
     local top
     top="$(printf '%s\n' "$filtered" \
-      | awk '{for(i=1;i<=NF;i++) if($i=="from"){print $(i+1); break}}' \
+      | grep -oE 'from [0-9a-fA-F.:]+' | awk '{print $2}' \
       | sort | uniq -c | sort -rn | head -3 \
-      | awk '{printf "  %s × %s\n", $1, $2}' || true)"
-    [[ -z "$top" ]] && top="(не удалось извлечь IP из journalctl)"
+      | awk 'NF==2 {printf "  %s × %s\n", $1, $2}' || true)"
+    # [[ -z ]] не ловит строку из пробелов/переносов — проверяем через подстановку.
+    [[ -n "${top//[[:space:]]/}" ]] || top="(не удалось извлечь IP из journalctl)"
     _emit WARN security_ssh_brute "Неудачных SSH-логинов за час: ${count}" "Топ источников:"$'\n'"${top}"
   fi
 }
