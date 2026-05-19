@@ -274,7 +274,14 @@ collect_ports() {
   elif (( OPT_NON_INTERACTIVE == 1 )); then
     NODE_PORT="${ARG_NODE_PORT:-$(ports_compose_node_port)}"
     NODE_PORT="${NODE_PORT:-2222}"
-    INBOUND_PORTS="${ARG_INBOUND_PORTS:-443,8388}"
+    if [[ -n "$ARG_INBOUND_PORTS" ]]; then
+      INBOUND_PORTS="$ARG_INBOUND_PORTS"
+    else
+      local _auto_inbound
+      _auto_inbound="$(ports_listening_xray 2>/dev/null \
+        | grep -v "^${NODE_PORT}$" | paste -sd, - || true)"
+      INBOUND_PORTS="${_auto_inbound:-443}"
+    fi
   else
     if ! ports_wizard </dev/tty; then
       log_error "Port wizard отменён"

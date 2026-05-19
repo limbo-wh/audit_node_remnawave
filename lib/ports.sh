@@ -327,10 +327,20 @@ ports_wizard() {
     return 1
   fi
 
-  printf '[3/3] Стандартные порты инбаундов: 443, 8388\n'
-  printf '      [s] Использовать стандартные\n'
-  printf '      [c] Ввести свои (если меняли в панели)\n'
-  printf '      [a] Добавить дополнительные к стандартным\n'
+  # Пытаемся определить реальные порты xray, исключая NODE_PORT.
+  local detected_inbound default_inbound
+  detected_inbound="$(ports_listening_xray 2>/dev/null \
+    | grep -v "^${WIZARD_NODE_PORT}$" | _to_csv || true)"
+  if [[ -n "$detected_inbound" ]]; then
+    default_inbound="$detected_inbound"
+    printf '[3/3] Обнаруженные порты инбаундов xray: %s\n' "$default_inbound"
+  else
+    default_inbound="443"
+    printf '[3/3] Порты инбаундов xray (не удалось определить автоматически): %s\n' "$default_inbound"
+  fi
+  printf '      [s] Использовать обнаруженные (%s)\n' "$default_inbound"
+  printf '      [c] Ввести свои\n'
+  printf '      [a] Добавить дополнительные к обнаруженным\n'
   printf '      Выбор [s/c/a, default s]: '
   local choice extra
   read -r choice
@@ -342,10 +352,10 @@ ports_wizard() {
     a|A)
       printf '      Дополнительные порты (CSV): '
       read -r extra
-      WIZARD_INBOUND_PORTS="$(_csv_normalize "443,8388,${extra}")"
+      WIZARD_INBOUND_PORTS="$(_csv_normalize "${default_inbound},${extra}")"
       ;;
     *)
-      WIZARD_INBOUND_PORTS="443,8388"
+      WIZARD_INBOUND_PORTS="$default_inbound"
       ;;
   esac
   WIZARD_INBOUND_PORTS="$(_csv_normalize "$WIZARD_INBOUND_PORTS")"
