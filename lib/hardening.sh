@@ -180,6 +180,14 @@ hardening_setup_fail2ban() {
     ignoreip+=" $(printf '%s' "$admin_ips_csv" | tr ',' ' ')"
   fi
 
+  # На минимальных Ubuntu /var/log/auth.log отсутствует (только journald).
+  # fail2ban падает с "Have not found any log file for sshd jail" если backend=auto.
+  local backend="auto"
+  if [[ ! -f /var/log/auth.log ]]; then
+    backend="systemd"
+    log_info "fail2ban: /var/log/auth.log отсутствует — используем backend=systemd"
+  fi
+
   mkdir -p /etc/fail2ban/jail.d
 
   local tmp
@@ -193,8 +201,9 @@ maxretry = 5
 ignoreip = ${ignoreip}
 
 [sshd]
-enabled = true
-port    = ${ssh_port}
+enabled  = true
+port     = ${ssh_port}
+backend  = ${backend}
 EOF
   chmod 644 "$tmp"
   mv "$tmp" "$FAIL2BAN_JAIL_FILE"
@@ -206,7 +215,7 @@ EOF
     systemctl start fail2ban >/dev/null 2>&1
   fi
   state_set "hardening_fail2ban_managed" "1"
-  log_info "fail2ban: jail [sshd] (port=${ssh_port}, ignoreip=${ignoreip})"
+  log_info "fail2ban: jail [sshd] (port=${ssh_port}, backend=${backend}, ignoreip=${ignoreip})"
 }
 
 # ---------------------------------------------------------------------------
