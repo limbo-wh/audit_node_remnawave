@@ -24,6 +24,10 @@ SSH_ADMIN_IPS=                # CSV админских IP — попытки л�
 # --- Опц. auto-recovery ---
 AUTO_RECOVER=0                # 1 = пытаться docker compose up -d при CRIT container_status (max 3/час)
 
+# --- Авто-обновление скрипта ---
+AUTO_UPDATE=0                 # 1 = git pull раз в сутки (только если скрипт установлен из git-репо)
+AUTO_UPDATE_INTERVAL_HOURS=24 # интервал обновления в часах (по умолчанию 24)
+
 # --- Пороги ---
 THRESHOLD_CPU=80
 THRESHOLD_RAM=85

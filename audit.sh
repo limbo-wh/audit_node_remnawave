@@ -173,6 +173,8 @@ run_checks_and_dispatch() {
   if [[ "${AUTO_RECOVER_FLAG}" == "1" || "${AUTO_RECOVER:-0}" == "1" ]]; then
     auto_recover_if_needed "$results"
   fi
+
+  _auto_update_if_due
 }
 
 # auto_recover_if_needed <results>
@@ -208,6 +210,29 @@ auto_recover_if_needed() {
     log_warn "auto-recover: docker compose up failed (rc=${rc})"
     log_debug "${out}"
   fi
+}
+
+# Вызывается из run_checks_and_dispatch при AUTO_UPDATE=1.
+# Запускает action_self_update не чаще одного раза в AUTO_UPDATE_INTERVAL_HOURS часов.
+# Время попытки фиксируется до pull — при сетевом сбое повтор только через следующий интервал.
+# EXIT_CODE основного прогона не меняется.
+_auto_update_if_due() {
+  [[ "${AUTO_UPDATE:-0}" != "1" ]] && return 0
+  [[ -d "${SCRIPT_DIR}/.git" ]] || return 0  # не git-репо — тихий пропуск без ошибки
+  is_root || return 0
+
+  local interval_sec now last_update
+  interval_sec=$(( ${AUTO_UPDATE_INTERVAL_HOURS:-24} * 3600 ))
+  now="$(date +%s)"
+  last_update="$(state_get_int "last_auto_update_unix" 0)"
+  (( now - last_update < interval_sec )) && return 0
+
+  log_info "auto-update: плановая проверка (интервал ${AUTO_UPDATE_INTERVAL_HOURS:-24}ч)"
+  state_set "last_auto_update_unix" "$now"
+
+  local _saved_exit="$EXIT_CODE"
+  action_self_update
+  EXIT_CODE="$_saved_exit"
 }
 
 # --diagnose: запускает все проверки, печатает в stdout (включая OK),
