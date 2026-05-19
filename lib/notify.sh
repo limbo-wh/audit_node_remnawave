@@ -47,6 +47,7 @@ notify_init() {
 _humanize_key() {
   local key="$1"
   case "$key" in
+    boot_grace)                   printf 'Хост загружен, проверки запущены' ;;
     container_missing)            printf 'Контейнер remnanode восстановлен' ;;
     container_status)             printf 'Контейнер remnanode снова running' ;;
     container_unhealthy)          printf 'Контейнер remnanode healthy' ;;

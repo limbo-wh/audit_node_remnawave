@@ -259,51 +259,85 @@ ports_sync_interactive() {
   declared="$(ports_declared_csv)"
   diff_csv="$(_csv_diff "$listening" "$declared")"
 
-  if [[ -z "$diff_csv" ]]; then
-    log_info "Drift не обнаружен — всё синхронизировано."
-    return 0
-  fi
+  local changed=0
 
-  printf 'Слушает но не разрешено: %s\n' "$diff_csv"
-  printf 'Применить (ufw allow + дописать в INBOUND_PORTS)? [y/N]: '
-  local reply
-  read -r reply
-  if [[ "$reply" != "y" && "$reply" != "Y" ]]; then
-    log_info "Отменено."
-    return 0
-  fi
-
-  if ! command -v ufw >/dev/null 2>&1; then
-    log_error "ufw не установлен — не могу применить."
-    return 1
-  fi
-
-  local p
-  local IFS=','
-  for p in $diff_csv; do
-    [[ -z "$p" ]] && continue
-    log_info "ufw allow ${p}/tcp"
-    ufw allow "${p}/tcp" comment 'remnanode inbound (sync-ports)' >/dev/null || \
-      log_warn "ufw allow ${p} failed"
-  done
-  unset IFS
-
-  # Дописываем в audit.conf новые порты в INBOUND_PORTS.
-  # NB: _csv_normalize читает $1 (не stdin) — нельзя через pipe!
-  local new_inbound
-  new_inbound="$(_csv_normalize "${INBOUND_PORTS:-},${diff_csv}")"
-  if [[ -f "$CONFIG_PATH" ]]; then
-    if grep -q '^INBOUND_PORTS=' "$CONFIG_PATH"; then
-      sed -i "s|^INBOUND_PORTS=.*|INBOUND_PORTS=${new_inbound}|" "$CONFIG_PATH"
-    else
-      printf 'INBOUND_PORTS=%s\n' "$new_inbound" >> "$CONFIG_PATH"
+  # --- Блок 1: новые порты (xray слушает, но не в whitelist) ---
+  if [[ -n "$diff_csv" ]]; then
+    printf 'Слушает но не разрешено: %s\n' "$diff_csv"
+    printf 'Применить (ufw allow + добавить в INBOUND_PORTS)? [y/N]: '
+    local reply
+    read -r reply
+    if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
+      if ! command -v ufw >/dev/null 2>&1; then
+        log_error "ufw не установлен — не могу применить."
+        return 1
+      fi
+      local p
+      local IFS=','
+      for p in $diff_csv; do
+        [[ -z "$p" ]] && continue
+        log_info "ufw allow ${p}/tcp"
+        ufw allow "${p}/tcp" comment 'remnanode inbound (sync-ports)' >/dev/null || \
+          log_warn "ufw allow ${p} failed"
+      done
+      unset IFS
+      local new_inbound
+      new_inbound="$(_csv_normalize "${INBOUND_PORTS:-},${diff_csv}")"
+      if [[ -f "$CONFIG_PATH" ]]; then
+        if grep -q '^INBOUND_PORTS=' "$CONFIG_PATH"; then
+          sed -i "s|^INBOUND_PORTS=.*|INBOUND_PORTS=${new_inbound}|" "$CONFIG_PATH"
+        else
+          printf 'INBOUND_PORTS=%s\n' "$new_inbound" >> "$CONFIG_PATH"
+        fi
+        INBOUND_PORTS="$new_inbound"
+        log_info "audit.conf обновлён: INBOUND_PORTS=${new_inbound}"
+      else
+        log_warn "Конфиг ${CONFIG_PATH} не найден — пропуск записи INBOUND_PORTS"
+      fi
+      changed=1
     fi
-    log_info "audit.conf обновлён: INBOUND_PORTS=${new_inbound}"
-  else
-    log_warn "Конфиг ${CONFIG_PATH} не найден — пропуск записи INBOUND_PORTS"
   fi
 
-  log_info "Синхронизация завершена."
+  # --- Блок 2: пропавшие порты (в INBOUND_PORTS, но xray больше не слушает) ---
+  # Пропускаем если xray не запущен совсем (listening пустой) — иначе предложим
+  # удалить всё, что некорректно.
+  if [[ -n "$listening" && -n "${INBOUND_PORTS:-}" ]]; then
+    local gone_csv
+    gone_csv="$(_csv_diff "${INBOUND_PORTS:-}" "$listening")"
+    if [[ -n "$gone_csv" ]]; then
+      printf '\nЗаявлены в INBOUND_PORTS, но xray не слушает: %s\n' "$gone_csv"
+      printf 'Убрать из audit.conf и UFW? [y/N]: '
+      local reply2
+      read -r reply2
+      if [[ "$reply2" == "y" || "$reply2" == "Y" ]]; then
+        local p2
+        local IFS=','
+        for p2 in $gone_csv; do
+          [[ -z "$p2" ]] && continue
+          log_info "ufw delete allow ${p2}/tcp"
+          ufw delete allow "${p2}/tcp" >/dev/null 2>&1 || true
+          ufw delete allow "${p2}"     >/dev/null 2>&1 || true
+        done
+        unset IFS
+        local cleaned_inbound
+        cleaned_inbound="$(_csv_diff "${INBOUND_PORTS:-}" "$gone_csv")"
+        if [[ -f "$CONFIG_PATH" ]]; then
+          sed -i "s|^INBOUND_PORTS=.*|INBOUND_PORTS=${cleaned_inbound}|" "$CONFIG_PATH"
+          INBOUND_PORTS="$cleaned_inbound"
+          log_info "audit.conf обновлён: INBOUND_PORTS=${cleaned_inbound}"
+        fi
+        changed=1
+      fi
+    fi
+  fi
+
+  if (( changed == 0 )) && [[ -z "$diff_csv" ]]; then
+    log_info "Drift не обнаружен — всё синхронизировано."
+  elif (( changed == 0 )); then
+    log_info "Изменения не применены."
+  else
+    log_info "Синхронизация завершена."
+  fi
 }
 
 # ---------------------------------------------------------------------------

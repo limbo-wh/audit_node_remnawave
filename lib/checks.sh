@@ -527,7 +527,25 @@ check_security_failed_ssh() {
     else
       top="(не удалось извлечь IP из journalctl)"
     fi
-    _emit WARN security_ssh_brute "Неудачных SSH-логинов за час: ${count}" "Топ источников:"$'\n'"${top}"
+    local f2b_note
+    if systemctl is-active --quiet fail2ban 2>/dev/null; then
+      local banned_count
+      banned_count="$(fail2ban-client status sshd 2>/dev/null \
+        | awk '/Currently banned/{print $NF+0}' || printf '0')"
+      banned_count="${banned_count:-0}"
+      if (( banned_count > 0 )); then
+        f2b_note="fail2ban: активен, забанено IP: ${banned_count}"
+      else
+        f2b_note="fail2ban: активен (нет активных банов)"
+      fi
+    else
+      local top_ip
+      top_ip="$(printf '%s\n' "$all_ips" | head -1 | awk 'NF==2 {print $2}')"
+      f2b_note="⚠ fail2ban не запущен"
+      [[ -n "$top_ip" ]] && f2b_note+=$'\n'"  Заблокировать вручную: ufw deny from ${top_ip} to any"
+    fi
+    _emit WARN security_ssh_brute "Неудачных SSH-логинов за час: ${count}" \
+      "Топ источников:"$'\n'"${top}"$'\n'"${f2b_note}"
   fi
 }
 
@@ -593,6 +611,19 @@ check_integrity_image_update() {
 # checks_run_all — выполняет все проверки последовательно. Печатает SEV|key|msg|details строки.
 checks_run_all() {
   state_init
+
+  # Boot grace period: первые BOOT_GRACE_SEC секунд после старта хоста пропускаем
+  # все проверки — контейнер, NTP и инбаунды не успевают подняться, это даёт
+  # ложный шторм алертов. OnBootSec=60 у таймера гарантирует хотя бы один пропуск.
+  local _up_sec _grace
+  _up_sec="$(awk '{print int($1)}' /proc/uptime)"
+  _grace="${BOOT_GRACE_SEC:-120}"
+  if (( _up_sec < _grace )); then
+    _emit INFO boot_grace \
+      "Хост загружается (uptime ${_up_sec}с) — проверки отложены на ${_grace}с" \
+      "Следующий полный прогон примерно через $(( _grace - _up_sec + 120 ))с"
+    return 0
+  fi
 
   check_container
   check_network_listen
