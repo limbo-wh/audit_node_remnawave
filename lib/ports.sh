@@ -80,8 +80,17 @@ ports_listening_xray() {
   pid_re="$(printf '%s' "$pids" | tr '\n' '|' | sed 's/^|//;s/|$//' || true)"
   # -p даёт users:(("name",pid=N,fd=K)) в выводе.
   # Используем [^0-9] вместо \b — не зависит от awk dialect (mawk vs gawk).
+  # Фильтруем localhost-only сокеты (127.x / [::1]) — они недоступны снаружи
+  # и не должны попадать в UFW whitelist (напр. внутренний gRPC/stats порт xray).
   ss -tlnpH 2>/dev/null \
-    | awk -v re="pid=(${pid_re})[^0-9]" '$0 ~ re {n=split($4,a,":"); print a[n]}' \
+    | awk -v re="pid=(${pid_re})[^0-9]" '
+        $0 ~ re {
+          n = split($4, a, ":");
+          port = a[n];
+          addr = substr($4, 1, length($4) - length(port) - 1);
+          if (addr ~ /^127\./ || addr == "[::1]" || addr == "::1") next;
+          print port
+        }' \
     | sort -un || true
 }
 
