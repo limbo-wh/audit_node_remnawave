@@ -246,6 +246,15 @@ _notify_should_send() {
 # Public: dispatch_results
 # ---------------------------------------------------------------------------
 
+# network_panel_link_lost уже имеет встроенный time-buffer (5 мин до первого CRIT),
+# поэтому RECOVERY для него не нуждается в дополнительной задержке.
+_recovery_hysteresis() {
+  case "$1" in
+    network_panel_link_lost) printf '2' ;;
+    *) printf '%d' "${RECOVERY_HYSTERESIS:-3}" ;;
+  esac
+}
+
 # notify_dispatch_results <multiline string with SEV|key|msg|details>
 notify_dispatch_results() {
   notify_init
@@ -286,7 +295,9 @@ notify_dispatch_results() {
       else
         cnt="$(state_get_int "recovery_count_${k}" 0)"
         cnt=$((cnt + 1))
-        if (( cnt >= RECOVERY_HYSTERESIS )); then
+        local _hyst
+        _hyst="$(_recovery_hysteresis "$k")"
+        if (( cnt >= _hyst )); then
           _notify_emit "RECOVERY" "$k" "$(_humanize_key "$k")" ""
           state_unset "alert_last_sent_${k}"
           state_unset "recovery_count_${k}"

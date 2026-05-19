@@ -221,9 +221,12 @@ run_diagnose() {
     [[ -z "$sev" ]] && continue
     details="${details//$'\x01'/$'\n    '}"
     case "$sev" in
-      CRIT) printf '🔴 [%s] %s\n    %s\n' "$key" "$msg" "${details:-}" ;;
-      WARN) printf '🟡 [%s] %s\n    %s\n' "$key" "$msg" "${details:-}" ;;
-      INFO) printf '🟢 [%s] %s\n    %s\n' "$key" "$msg" "${details:-}" ;;
+      CRIT) printf '🔴 [%s] %s\n' "$key" "$msg"
+            [[ -n "${details//[[:space:]]/}" ]] && printf '    %s\n' "$details" ;;
+      WARN) printf '🟡 [%s] %s\n' "$key" "$msg"
+            [[ -n "${details//[[:space:]]/}" ]] && printf '    %s\n' "$details" ;;
+      INFO) printf '🟢 [%s] %s\n' "$key" "$msg"
+            [[ -n "${details//[[:space:]]/}" ]] && printf '    %s\n' "$details" ;;
       OK)   printf '✓  [%s] %s\n' "$key" "$msg" ;;
     esac
   done <<<"$results"
@@ -322,6 +325,12 @@ action_self_update() {
       "$diff_text"
   fi
 
+  systemctl daemon-reload 2>/dev/null || true
+  local changelog
+  changelog="$(git -C "$SCRIPT_DIR" log --oneline "${before}..${after}" 2>/dev/null | head -5 || true)"
+  _notify_emit INFO self_update_done \
+    "Скрипт обновлён до ${after:0:8}" \
+    "${changelog:-нет деталей}"
   log_info "Self-update завершён: ${after:0:12}"
 }
 
@@ -376,7 +385,7 @@ action_daily_summary() {
 
   local ip uptime_h started uptime_c restarts sess_443 sess_8388
   local disk_pct ram_pct la cert_days reboot_req
-  local ufw_st f2b_st uu_st crit_24h warn_24h since
+  local ufw_st f2b_st uu_st crit_24h warn_24h since crit_list incidents_line
   ip="$(state_get "network_external_ip" "?")"
 
   # Uptime контейнера
@@ -438,14 +447,22 @@ action_daily_summary() {
 
   # Инциденты за 24 часа из alerts.log
   since="$(date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"
-  if [[ -f "${LOG_DIR}/alerts.log" && -n "$since" ]]; then
+  crit_list=""
+  if [[ -f "$LOG_FILE" && -n "$since" ]]; then
     crit_24h="$(jq -c --arg s "$since" 'select(.ts > $s and .sev == "CRIT")' \
-                "${LOG_DIR}/alerts.log" 2>/dev/null | wc -l)"
+                "$LOG_FILE" 2>/dev/null | wc -l)"
     warn_24h="$(jq -c --arg s "$since" 'select(.ts > $s and .sev == "WARN")' \
-                "${LOG_DIR}/alerts.log" 2>/dev/null | wc -l)"
+                "$LOG_FILE" 2>/dev/null | wc -l)"
+    if (( crit_24h > 0 )); then
+      crit_list="$(jq -r --arg s "$since" \
+        'select(.ts > $s and .sev == "CRIT") | "  \(.ts[11:16]) \(.msg)"' \
+        "$LOG_FILE" 2>/dev/null | tail -5 || true)"
+    fi
   else
     crit_24h=0; warn_24h=0
   fi
+  incidents_line="Инцидентов за сутки: ${crit_24h} critical, ${warn_24h} warning"
+  [[ -n "$crit_list" ]] && incidents_line+=$'\n'"${crit_list}"
 
   local body
   body="$(cat <<EOF
@@ -457,7 +474,7 @@ action_daily_summary() {
 Образ: ${image_status}
 Хост uptime: ${uptime_h}
 UFW: ${ufw_st} | fail2ban: ${f2b_st} | auto-upgrades: ${uu_st}
-Инцидентов за сутки: ${crit_24h} critical, ${warn_24h} warning
+${incidents_line}
 Перезагрузка хоста требуется: ${reboot_req}
 Версия скрипта: ${VERSION}
 EOF
