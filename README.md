@@ -160,9 +160,9 @@ sudo /opt/remnawave-audit/install.sh
 
 ## Статус
 
-**v1.0.0 — production ready.** Прошёл боевое тестирование на ноде Remnawave
-(Ubuntu 22.04, Финляндия): pre-flight, hardening, NTP с fallback на NTS+htpdate,
+**v1.1.0 — production ready.** Прошёл боевое тестирование на нескольких нодах Remnawave
+(Ubuntu 22.04/24.04): pre-flight, hardening, NTP с fallback на NTS+htpdate,
 24+ проверок, port drift detection, recovery hysteresis, offline queue, TUI с
-интерактивными trigger-тестами.
+интерактивными trigger-тестами, авто-обновление из git (`AUTO_UPDATE=1`).
 
 См. полный список изменений в [CHANGELOG.md](CHANGELOG.md).

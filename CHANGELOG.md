@@ -3,6 +3,34 @@
 Все заметные изменения этого проекта документируются в этом файле.
 Формат — [Keep a Changelog](https://keepachangelog.com/), версионирование — [SemVer](https://semver.org/lang/ru/).
 
+## [1.1.0] — 2026-05-20
+
+### Added
+
+- **AUTO_UPDATE** — авто-обновление скрипта из git раз в сутки (`AUTO_UPDATE=1` по умолчанию).
+  `_auto_update_if_due()` вызывается в конце каждого прогона; интервал задаётся `AUTO_UPDATE_INTERVAL_HOURS`.
+- **migrate_config()** в `install.sh --upgrade` — автодобавляет недостающие ключи в существующий `audit.conf`
+  (например `AUTO_UPDATE=1`) без повторного ввода конфига.
+- **fail2ban-статус в SSH brute-алерте** — если fail2ban активен, показывает кол-во забаненных IP;
+  если неактивен — предлагает `ufw deny from <top_ip> to any`.
+- **Вопрос про авто-обновление при `install.sh`** — включено по умолчанию, предлагается отключить (`[y/N]`).
+- **`--self-update` отправляет Telegram-уведомление** с changelog и запускает `systemctl daemon-reload`.
+
+### Fixed
+
+- **IPv4 вместо IPv6** при определении внешнего IP — `curl -4` first pass; fallback без флага для IPv6-only серверов.
+- **`git pull --ff-only` fallback** — при force-push upstream `--self-update` теперь автоматически
+  делает `git fetch origin && git reset --hard origin/main`.
+- **`--diagnose`** — пустая строка details больше не печатается.
+- **`migrate_config()`** — `(( added == 0 ))` crashил `set -e`; переписано на `if/fi`.
+
+### Changed
+
+- **Daily summary** — CRIT-инциденты за 24ч сгруппированы отдельной строкой.
+- **Recovery hysteresis** — настраивается per-key (`network_panel_link_lost` = 2 цикла, остальные = 3).
+
+---
+
 ## [1.0.0] — 2026-05-09
 
 Production-ready релиз. Прошёл боевое тестирование на реальной ноде Remnawave.
