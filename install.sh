@@ -57,6 +57,7 @@ ARG_PROBE_URL=""
 ARG_THRESHOLD_CPU=""
 ARG_THRESHOLD_RAM=""
 ARG_THRESHOLD_DISK=""
+ARG_AUTO_UPDATE=""
 
 OPT_FORCE=0
 OPT_UPGRADE=0
@@ -100,6 +101,8 @@ install.sh — установка remnawave-node-audit на ноду.
   --skip-fail2ban            не настраивать fail2ban
   --skip-unattended          не настраивать unattended-upgrades
   --skip-ntp                 не настраивать NTP (использует свой источник времени)
+  --auto-update              включить автообновление из git (git pull 1 раз в сутки)
+  --no-auto-update           выключить автообновление (без вопроса)
   --ufw-rate-limit           ufw limit ssh_port/tcp вместо allow
   --ufw-force-reset          разрешить ufw reset при существующих правилах
   --set-host-timezone        выровнять системную TZ хоста под --tz (без вопросов)
@@ -131,6 +134,8 @@ parse_args() {
       --threshold-cpu=*)   ARG_THRESHOLD_CPU="${1#*=}" ;;
       --threshold-ram=*)   ARG_THRESHOLD_RAM="${1#*=}" ;;
       --threshold-disk=*)  ARG_THRESHOLD_DISK="${1#*=}" ;;
+      --auto-update)       ARG_AUTO_UPDATE=1 ;;
+      --no-auto-update)    ARG_AUTO_UPDATE=0 ;;
       --force)             OPT_FORCE=1 ;;
       --upgrade)           OPT_UPGRADE=1 ;;
       --hardening-only)    OPT_HARDENING_ONLY=1 ;;
@@ -299,6 +304,19 @@ collect_thresholds() {
   THRESHOLD_DISK="${ARG_THRESHOLD_DISK:-85}"
   SSH_ADMIN_IPS="${ARG_SSH_ADMIN_IPS:-}"
   EXTERNAL_PROBE_URL="${ARG_PROBE_URL:-}"
+
+  if [[ -n "$ARG_AUTO_UPDATE" ]]; then
+    AUTO_UPDATE="$ARG_AUTO_UPDATE"
+  elif (( OPT_NON_INTERACTIVE == 1 )); then
+    AUTO_UPDATE=0
+  else
+    local ans
+    printf '\nАвтообновление скрипта из git (git pull 1 раз в сутки)? [y/N]: ' >&2
+    read -r ans </dev/tty
+    AUTO_UPDATE=0
+    [[ "$ans" == "y" || "$ans" == "Y" ]] && AUTO_UPDATE=1
+    log_info "AUTO_UPDATE=${AUTO_UPDATE}"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -339,7 +357,10 @@ write_audit_conf() {
     printf 'COOLDOWN_CRITICAL_SEC=900\n'
     printf 'COOLDOWN_WARNING_SEC=3600\n\n'
     printf '# --- Опц. ---\n'
-    printf 'EXTERNAL_PROBE_URL=%s\n' "$(printf '%q' "$EXTERNAL_PROBE_URL")"
+    printf 'EXTERNAL_PROBE_URL=%s\n\n' "$(printf '%q' "$EXTERNAL_PROBE_URL")"
+    printf '# --- Авто-обновление ---\n'
+    printf 'AUTO_UPDATE=%s\n' "${AUTO_UPDATE:-0}"
+    printf '# AUTO_UPDATE_INTERVAL_HOURS=24\n'
   } > "$tmp"
   mv "$tmp" "$CONFIG_PATH"
   chmod 600 "$CONFIG_PATH"
