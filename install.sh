@@ -308,13 +308,14 @@ collect_thresholds() {
   if [[ -n "$ARG_AUTO_UPDATE" ]]; then
     AUTO_UPDATE="$ARG_AUTO_UPDATE"
   elif (( OPT_NON_INTERACTIVE == 1 )); then
-    AUTO_UPDATE=0
+    AUTO_UPDATE=1
   else
     local ans
-    printf '\nАвтообновление скрипта из git (git pull 1 раз в сутки)? [y/N]: ' >&2
+    printf '\nАвтообновление скрипта из git включено по умолчанию (git pull 1 раз в сутки).\n' >&2
+    printf 'Отключить? [y/N]: ' >&2
     read -r ans </dev/tty
-    AUTO_UPDATE=0
-    [[ "$ans" == "y" || "$ans" == "Y" ]] && AUTO_UPDATE=1
+    AUTO_UPDATE=1
+    [[ "$ans" == "y" || "$ans" == "Y" ]] && AUTO_UPDATE=0
     log_info "AUTO_UPDATE=${AUTO_UPDATE}"
   fi
 }
@@ -477,9 +478,9 @@ migrate_config() {
 
   if ! grep -q '^AUTO_UPDATE=' "$CONFIG_PATH" 2>/dev/null; then
     printf '\n# --- Авто-обновление ---\n' >> "$CONFIG_PATH"
-    printf 'AUTO_UPDATE=0\n' >> "$CONFIG_PATH"
+    printf 'AUTO_UPDATE=1\n' >> "$CONFIG_PATH"
     printf '# AUTO_UPDATE_INTERVAL_HOURS=24\n' >> "$CONFIG_PATH"
-    log_info "audit.conf: добавлен AUTO_UPDATE=0 (включить: echo 'AUTO_UPDATE=1' | sudo tee -a ${CONFIG_PATH})"
+    log_info "audit.conf: добавлен AUTO_UPDATE=1 (отключить: поменяй на 0 в ${CONFIG_PATH})"
     added=1
   fi
 
