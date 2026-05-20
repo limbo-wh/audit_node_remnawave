@@ -467,6 +467,26 @@ smoke_test() {
 }
 
 # ---------------------------------------------------------------------------
+# Миграция audit.conf: добавляет ключи появившиеся в новых версиях.
+# Никогда не перезаписывает существующие значения.
+# ---------------------------------------------------------------------------
+
+migrate_config() {
+  [[ -f "$CONFIG_PATH" ]] || return 0
+  local added=0
+
+  if ! grep -q '^AUTO_UPDATE=' "$CONFIG_PATH" 2>/dev/null; then
+    printf '\n# --- Авто-обновление ---\n' >> "$CONFIG_PATH"
+    printf 'AUTO_UPDATE=0\n' >> "$CONFIG_PATH"
+    printf '# AUTO_UPDATE_INTERVAL_HOURS=24\n' >> "$CONFIG_PATH"
+    log_info "audit.conf: добавлен AUTO_UPDATE=0 (включить: echo 'AUTO_UPDATE=1' | sudo tee -a ${CONFIG_PATH})"
+    added=1
+  fi
+
+  (( added == 0 )) && log_info "audit.conf: миграция не нужна, всё актуально"
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -482,6 +502,7 @@ main() {
     # shellcheck disable=SC1090
     . "$CONFIG_PATH"
     TZ_VALUE="${TZ:-UTC}"
+    migrate_config
     install_systemd_units
     enable_systemd_timers
     install_logrotate
