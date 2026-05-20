@@ -11,6 +11,7 @@ readonly SCRIPT_DIR
 readonly LIB_DIR="${SCRIPT_DIR}/lib"
 readonly CONFIG_PATH="${REMNAWAVE_AUDIT_CONFIG:-/etc/remnawave-audit/audit.conf}"
 readonly STATE_DIR="/var/lib/remnawave-audit"
+# shellcheck disable=SC2034  # LOG_DIR used in lib/notify.sh and lib/util.sh (cross-file)
 readonly LOG_DIR="/var/log/remnawave-audit"
 readonly LOCK_FILE="/run/remnawave-audit.lock"
 readonly LOCK_FILE_FALLBACK="/var/run/remnawave-audit.lock"
@@ -313,9 +314,16 @@ action_self_update() {
 
   local before after
   before="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
-  if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet; then
-    log_error "git pull --ff-only failed"
-    EXIT_CODE=1; return
+  if ! git -C "$SCRIPT_DIR" pull --ff-only --quiet 2>/dev/null; then
+    log_warn "git pull --ff-only failed (история могла быть перезаписана), пробую fetch + reset --hard"
+    if ! git -C "$SCRIPT_DIR" fetch origin --quiet; then
+      log_error "git fetch origin failed"
+      EXIT_CODE=1; return
+    fi
+    if ! git -C "$SCRIPT_DIR" reset --hard origin/main --quiet; then
+      log_error "git reset --hard origin/main failed"
+      EXIT_CODE=1; return
+    fi
   fi
   after="$(git -C "$SCRIPT_DIR" rev-parse HEAD)"
 

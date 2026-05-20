@@ -174,17 +174,26 @@ check_network_panel_link() {
 
 # Кворум из 3 источников — спасает от кэш-несогласованности и MitM на одном hop'е.
 # Возвращает наиболее частый ответ (≥ 2 из 3), либо пусто если согласия нет.
+# Предпочитаем IPv4 (-4): на двустековых серверах curl по умолчанию берёт IPv6.
+# Fallback без -4 — для серверов с только IPv6.
 _get_external_ip_quorum() {
   local sources=("https://ifconfig.io" "https://api.ipify.org" "https://icanhazip.com")
   local src r ips=""
   for src in "${sources[@]}"; do
-    # || true — потому что под pipefail timeout/curl могут вернуть 124/22,
-    # и pipe целиком вернёт non-zero → set -e убьёт функцию.
-    r="$(timeout 5 curl -fsS --max-time 5 "$src" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
-    if [[ "$r" =~ ^[0-9.]+$|^[0-9a-fA-F:]+$ ]]; then
+    r="$(timeout 5 curl -4 -fsS --max-time 5 "$src" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+    if [[ "$r" =~ ^[0-9.]+$ ]]; then
       ips+="${r}"$'\n'
     fi
   done
+  # Нет IPv4-ответов → сервер, вероятно, IPv6-only: повторяем без -4.
+  if [[ -z "$ips" ]]; then
+    for src in "${sources[@]}"; do
+      r="$(timeout 5 curl -fsS --max-time 5 "$src" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+      if [[ "$r" =~ ^[0-9.]+$|^[0-9a-fA-F:]+$ ]]; then
+        ips+="${r}"$'\n'
+      fi
+    done
+  fi
   [[ -z "$ips" ]] && return 0
   printf '%s' "$ips" | sort | uniq -c | sort -rn | head -1 | awk '$1>=2 {print $2}' || true
 }
