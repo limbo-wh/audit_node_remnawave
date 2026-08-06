@@ -58,7 +58,16 @@ ARG_THRESHOLD_CPU=""
 ARG_THRESHOLD_RAM=""
 ARG_THRESHOLD_DISK=""
 ARG_AUTO_UPDATE=""
+ARG_NODE_PORT_ALLOW_FROM=""
+ARG_UFW_MODE=""
+ARG_FAIL2BAN_MODE=""
 
+# Значения, перенятые из уже настроенной на сервере безопасности (adopt).
+ADOPTED_EXTRA_PORTS=""
+ADOPTED_SSH_ADMIN_IPS=""
+ADOPTED_NODE_PORT_ALLOW_FROM=""
+
+OPT_ADOPT=1
 OPT_FORCE=0
 OPT_UPGRADE=0
 OPT_HARDENING_ONLY=0
@@ -87,6 +96,7 @@ install.sh — установка remnawave-node-audit на ноду.
   --node-port=N              порт связи с панелью (default: из docker-compose.yml)
   --inbound-ports=CSV        порты Xray-инбаундов (default: 443,8388)
   --extra-ports=CSV          дополнительные порты в whitelist
+  --node-port-allow-from=IP  открыть порт панели только с этого IP/CIDR
   --ssh-admin-ips=CSV        IP админа — игнорировать в SSH-проверке
   --probe-url=URL            опц. https://<panel>/api/health
   --threshold-cpu=N          порог CPU (default 80)
@@ -104,7 +114,13 @@ install.sh — установка remnawave-node-audit на ноду.
   --auto-update              включить автообновление из git (git pull 1 раз в сутки)
   --no-auto-update           выключить автообновление (без вопроса)
   --ufw-rate-limit           ufw limit ssh_port/tcp вместо allow
+  --ufw-mode=MODE            preserve (default) — дополнить правила, ничего не удаляя
+                             reset — пересобрать список правил с нуля
+  --fail2ban-mode=MODE       preserve (default) — не трогать чужой [sshd] jail
+                             manage — управлять jail'ом самому
+  --no-adopt                 не перенимать существующие настройки UFW/fail2ban
   --ufw-force-reset          разрешить ufw reset при существующих правилах
+                             (только при --ufw-mode=reset)
   --set-host-timezone        выровнять системную TZ хоста под --tz (без вопросов)
   --keep-host-timezone       не трогать системную TZ хоста (даже если интерактив)
   --non-interactive          не задавать вопросов, провалиться если чего-то не хватает
@@ -116,6 +132,13 @@ install.sh — установка remnawave-node-audit на ноду.
   sudo ./install.sh --bot-token=123:AAA --admin-id=12345 --node-name=Finland2 --tz=Europe/Moscow
   sudo ./install.sh --upgrade
   sudo ./install.sh --hardening-only --skip-fail2ban
+
+  # Нода с уже настроенным вручную UFW/fail2ban — без единого вопроса.
+  # Существующие правила (в т.ч. ограниченные по source-IP) сохраняются как есть,
+  # доп. порты и доверенные IP считываются с сервера автоматически:
+  sudo ./install.sh --non-interactive \
+    --bot-token=123:AAA --admin-id=12345 --node-name=Finland2 --tz=Europe/Berlin \
+    --node-port-allow-from=155.212.132.159
 USAGE
 }
 
@@ -129,6 +152,7 @@ parse_args() {
       --node-port=*)       ARG_NODE_PORT="${1#*=}" ;;
       --inbound-ports=*)   ARG_INBOUND_PORTS="${1#*=}" ;;
       --extra-ports=*)     ARG_EXTRA_PORTS="${1#*=}" ;;
+      --node-port-allow-from=*) ARG_NODE_PORT_ALLOW_FROM="${1#*=}" ;;
       --ssh-admin-ips=*)   ARG_SSH_ADMIN_IPS="${1#*=}" ;;
       --probe-url=*)       ARG_PROBE_URL="${1#*=}" ;;
       --threshold-cpu=*)   ARG_THRESHOLD_CPU="${1#*=}" ;;
@@ -145,6 +169,9 @@ parse_args() {
       --skip-unattended)   OPT_SKIP_UNATTENDED=1 ;;
       --skip-ntp)          OPT_SKIP_NTP=1 ;;
       --ufw-rate-limit)    OPT_UFW_RATE_LIMIT=1 ;;
+      --ufw-mode=*)        ARG_UFW_MODE="${1#*=}" ;;
+      --fail2ban-mode=*)   ARG_FAIL2BAN_MODE="${1#*=}" ;;
+      --no-adopt)          OPT_ADOPT=0 ;;
       --ufw-force-reset)   OPT_UFW_FORCE_RESET=1 ;;
       --set-host-timezone) OPT_SET_HOST_TZ=1 ;;
       --keep-host-timezone) OPT_SET_HOST_TZ=0 ;;
@@ -160,6 +187,22 @@ parse_args() {
   done
 
   # Валидация совместимости флагов СРАЗУ, до preflight.
+  if [[ -n "$ARG_UFW_MODE" && "$ARG_UFW_MODE" != "preserve" && "$ARG_UFW_MODE" != "reset" ]]; then
+    log_error "--ufw-mode: допустимо preserve или reset, получено '${ARG_UFW_MODE}'"
+    exit 1
+  fi
+  if [[ -n "$ARG_FAIL2BAN_MODE" && "$ARG_FAIL2BAN_MODE" != "preserve" && "$ARG_FAIL2BAN_MODE" != "manage" ]]; then
+    log_error "--fail2ban-mode: допустимо preserve или manage, получено '${ARG_FAIL2BAN_MODE}'"
+    exit 1
+  fi
+  # --ufw-force-reset осмысленен только при пересборке правил. Молча
+  # проигнорировать его в preserve — значит оставить админа в уверенности,
+  # что он что-то разрешил.
+  if (( OPT_UFW_FORCE_RESET == 1 )) && [[ "$ARG_UFW_MODE" != "reset" ]]; then
+    log_error "--ufw-force-reset требует --ufw-mode=reset (в режиме preserve ничего не удаляется)"
+    exit 1
+  fi
+
   if (( OPT_NON_INTERACTIVE == 1 )) && (( OPT_HARDENING_ONLY == 0 )) && (( OPT_UPGRADE == 0 )); then
     local missing_opts=""
     [[ -z "$ARG_BOT_TOKEN" ]] && missing_opts="${missing_opts}--bot-token "
@@ -272,7 +315,33 @@ collect_node_meta() {
   fi
 }
 
+# Считывает с сервера уже настроенную безопасность, чтобы установка её
+# продолжила, а не переопределила. Заполняет ADOPTED_*.
+# Вызывается только в неинтерактивных ветках — в wizard'е то же самое
+# показывается админу явными вопросами.
+adopt_existing_security() {
+  (( OPT_ADOPT == 1 )) || { log_info "--no-adopt: существующие настройки не считываются"; return 0; }
+
+  local ssh_port base_wl
+  ssh_port="$(ports_sshd_port)"
+  base_wl="$(_csv_normalize "${ssh_port},${NODE_PORT},${INBOUND_PORTS}")"
+
+  ADOPTED_EXTRA_PORTS="$(ports_ufw_extras_csv "$base_wl")"
+  ADOPTED_NODE_PORT_ALLOW_FROM="$(ports_ufw_source_for "$NODE_PORT")"
+  ADOPTED_SSH_ADMIN_IPS="$(ports_fail2ban_ignoreip)"
+
+  [[ -n "$ADOPTED_EXTRA_PORTS" ]] && \
+    log_info "adopt: порты, уже открытые в UFW вне whitelist → EXTRA_PORTS_WHITELIST=${ADOPTED_EXTRA_PORTS}"
+  [[ -n "$ADOPTED_NODE_PORT_ALLOW_FROM" ]] && \
+    log_info "adopt: NODE_PORT ${NODE_PORT} ограничен source ${ADOPTED_NODE_PORT_ALLOW_FROM} → сохраняю"
+  [[ -n "$ADOPTED_SSH_ADMIN_IPS" ]] && \
+    log_info "adopt: доверенные IP из fail2ban → SSH_ADMIN_IPS=${ADOPTED_SSH_ADMIN_IPS}"
+  return 0
+}
+
 collect_ports() {
+  local interactive_wizard=0
+
   if [[ -n "$ARG_NODE_PORT" && -n "$ARG_INBOUND_PORTS" ]]; then
     NODE_PORT="$ARG_NODE_PORT"
     INBOUND_PORTS="$ARG_INBOUND_PORTS"
@@ -294,15 +363,33 @@ collect_ports() {
     fi
     NODE_PORT="$WIZARD_NODE_PORT"
     INBOUND_PORTS="$WIZARD_INBOUND_PORTS"
+    interactive_wizard=1
   fi
-  EXTRA_PORTS_WHITELIST="${ARG_EXTRA_PORTS:-}"
+
+  if (( interactive_wizard == 1 )); then
+    # Всё уже подтверждено админом в мастере.
+    EXTRA_PORTS_WHITELIST="${ARG_EXTRA_PORTS:-${WIZARD_EXTRA_PORTS:-}}"
+    NODE_PORT_ALLOW_FROM="${ARG_NODE_PORT_ALLOW_FROM:-${WIZARD_NODE_PORT_ALLOW_FROM:-}}"
+    UFW_MODE="${ARG_UFW_MODE:-${WIZARD_UFW_MODE:-preserve}}"
+    ADOPTED_SSH_ADMIN_IPS="${WIZARD_SSH_ADMIN_IPS:-}"
+  else
+    adopt_existing_security
+    # Явный флаг важнее того, что найдено на сервере.
+    EXTRA_PORTS_WHITELIST="${ARG_EXTRA_PORTS:-$ADOPTED_EXTRA_PORTS}"
+    NODE_PORT_ALLOW_FROM="${ARG_NODE_PORT_ALLOW_FROM:-$ADOPTED_NODE_PORT_ALLOW_FROM}"
+    UFW_MODE="${ARG_UFW_MODE:-preserve}"
+  fi
+
+  FAIL2BAN_MODE="${ARG_FAIL2BAN_MODE:-preserve}"
+  EXTRA_PORTS_WHITELIST="$(_csv_normalize "$EXTRA_PORTS_WHITELIST")"
 }
 
 collect_thresholds() {
   THRESHOLD_CPU="${ARG_THRESHOLD_CPU:-80}"
   THRESHOLD_RAM="${ARG_THRESHOLD_RAM:-85}"
   THRESHOLD_DISK="${ARG_THRESHOLD_DISK:-85}"
-  SSH_ADMIN_IPS="${ARG_SSH_ADMIN_IPS:-}"
+  # Порядок важности: явный флаг → перенятое с сервера (fail2ban ignoreip).
+  SSH_ADMIN_IPS="${ARG_SSH_ADMIN_IPS:-${ADOPTED_SSH_ADMIN_IPS:-}}"
   EXTERNAL_PROBE_URL="${ARG_PROBE_URL:-}"
 
   if [[ -n "$ARG_AUTO_UPDATE" ]]; then
@@ -349,7 +436,13 @@ write_audit_conf() {
     printf 'INBOUND_PORTS=%s\n' "$INBOUND_PORTS"
     printf 'EXTRA_PORTS_WHITELIST=%s\n\n' "$EXTRA_PORTS_WHITELIST"
     printf '# --- Безопасность ---\n'
-    printf 'SSH_ADMIN_IPS=%s\n\n' "$SSH_ADMIN_IPS"
+    printf 'SSH_ADMIN_IPS=%s\n' "$SSH_ADMIN_IPS"
+    printf '# Порт панели открывается только с этого IP/CIDR (пусто — для всех).\n'
+    printf 'NODE_PORT_ALLOW_FROM=%s\n' "${NODE_PORT_ALLOW_FROM:-}"
+    printf '# preserve — дополнять правила UFW, ничего не удаляя; reset — пересобирать с нуля.\n'
+    printf 'UFW_MODE=%s\n' "${UFW_MODE:-preserve}"
+    printf '# preserve — не трогать чужой [sshd] jail; manage — управлять им самим.\n'
+    printf 'FAIL2BAN_MODE=%s\n\n' "${FAIL2BAN_MODE:-preserve}"
     printf '# --- Пороги ---\n'
     printf 'THRESHOLD_CPU=%s\n'  "$THRESHOLD_CPU"
     printf 'THRESHOLD_RAM=%s\n'  "$THRESHOLD_RAM"
@@ -484,6 +577,56 @@ migrate_config() {
     added=1
   fi
 
+  # UFW_MODE/FAIL2BAN_MODE на старых конфигах отсутствуют. Ставим preserve:
+  # апгрейд не должен пересобирать firewall на работающей ноде.
+  if ! grep -q '^UFW_MODE=' "$CONFIG_PATH" 2>/dev/null; then
+    printf '\n# preserve — дополнять правила UFW, ничего не удаляя; reset — пересобирать с нуля.\n' >> "$CONFIG_PATH"
+    printf 'UFW_MODE=preserve\n' >> "$CONFIG_PATH"
+    UFW_MODE="preserve"
+    log_info "audit.conf: добавлен UFW_MODE=preserve"
+    added=1
+  fi
+
+  if ! grep -q '^FAIL2BAN_MODE=' "$CONFIG_PATH" 2>/dev/null; then
+    printf '# preserve — не трогать чужой [sshd] jail; manage — управлять им самим.\n' >> "$CONFIG_PATH"
+    printf 'FAIL2BAN_MODE=preserve\n' >> "$CONFIG_PATH"
+    FAIL2BAN_MODE="preserve"
+    log_info "audit.conf: добавлен FAIL2BAN_MODE=preserve"
+    added=1
+  fi
+
+  # Ограничение порта панели по source-IP: если оно уже стоит в UFW руками —
+  # переносим в конфиг, иначе при следующей пересборке правило станет открытым.
+  if ! grep -q '^NODE_PORT_ALLOW_FROM=' "$CONFIG_PATH" 2>/dev/null; then
+    local detected_src=""
+    if (( OPT_ADOPT == 1 )) && [[ -n "${NODE_PORT:-}" ]]; then
+      detected_src="$(ports_ufw_source_for "$NODE_PORT")"
+    fi
+    printf '# Порт панели открывается только с этого IP/CIDR (пусто — для всех).\n' >> "$CONFIG_PATH"
+    printf 'NODE_PORT_ALLOW_FROM=%s\n' "$detected_src" >> "$CONFIG_PATH"
+    NODE_PORT_ALLOW_FROM="$detected_src"
+    if [[ -n "$detected_src" ]]; then
+      log_info "audit.conf: NODE_PORT_ALLOW_FROM=${detected_src} (перенято из текущих правил UFW)"
+    else
+      log_info "audit.conf: добавлен NODE_PORT_ALLOW_FROM= (пусто — порт панели открыт всем)"
+    fi
+    added=1
+  fi
+
+  # Порты, открытые в UFW вручную, но не заявленные в конфиге, иначе
+  # мониторинг считает их дрейфом и шлёт алерты на ровном месте.
+  if (( OPT_ADOPT == 1 )) && grep -q '^EXTRA_PORTS_WHITELIST=$' "$CONFIG_PATH" 2>/dev/null; then
+    local base_wl adopted
+    base_wl="$(_csv_normalize "$(ports_sshd_port),${NODE_PORT:-},${INBOUND_PORTS:-}")"
+    adopted="$(ports_ufw_extras_csv "$base_wl")"
+    if [[ -n "$adopted" ]]; then
+      sed -i "s|^EXTRA_PORTS_WHITELIST=$|EXTRA_PORTS_WHITELIST=${adopted}|" "$CONFIG_PATH"
+      EXTRA_PORTS_WHITELIST="$adopted"
+      log_info "audit.conf: EXTRA_PORTS_WHITELIST=${adopted} (порты уже открыты в UFW)"
+      added=1
+    fi
+  fi
+
   if (( added == 0 )); then
     log_info "audit.conf: миграция не нужна, всё актуально"
   fi
@@ -517,6 +660,9 @@ main() {
       (( OPT_SKIP_UNATTENDED == 1 ))  && hf+=(--skip-unattended)
       (( OPT_SKIP_NTP == 1 ))         && hf+=(--skip-ntp)
       (( OPT_UFW_RATE_LIMIT == 1 ))   && hf+=(--ufw-rate-limit)
+      # Значения из audit.conf; флаг CLI важнее.
+      hf+=("--ufw-mode=${ARG_UFW_MODE:-${UFW_MODE:-preserve}}")
+      hf+=("--fail2ban-mode=${ARG_FAIL2BAN_MODE:-${FAIL2BAN_MODE:-preserve}}")
       (( OPT_UFW_FORCE_RESET == 1 ))  && export HARDENING_UFW_FORCE_RESET=1
       hardening_run "${hf[@]}"
     fi
@@ -545,6 +691,10 @@ main() {
       . "$CONFIG_PATH"
       TZ_VALUE="${TZ:-UTC}"
       secrets_register "${BOT_TOKEN:-}"
+      # Конфиг мог быть создан прошлой версией — дополняем недостающими
+      # ключами (UFW_MODE, NODE_PORT_ALLOW_FROM, ...), иначе повторный запуск
+      # пойдёт со старым поведением и снова упрётся в те же правила UFW.
+      migrate_config
     else
       collect_telegram
       collect_node_meta
@@ -568,6 +718,8 @@ main() {
     (( OPT_SKIP_FAIL2BAN == 1 ))    && hf+=(--skip-fail2ban)
     (( OPT_SKIP_UNATTENDED == 1 ))  && hf+=(--skip-unattended)
     (( OPT_UFW_RATE_LIMIT == 1 ))   && hf+=(--ufw-rate-limit)
+    hf+=("--ufw-mode=${ARG_UFW_MODE:-${UFW_MODE:-preserve}}")
+    hf+=("--fail2ban-mode=${ARG_FAIL2BAN_MODE:-${FAIL2BAN_MODE:-preserve}}")
     (( OPT_UFW_FORCE_RESET == 1 ))  && export HARDENING_UFW_FORCE_RESET=1
     hardening_run "${hf[@]}"
   else

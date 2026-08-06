@@ -10,7 +10,9 @@
 readonly HARDENING_BACKUP_ROOT="${STATE_DIR:-/var/lib/remnawave-audit}/backup"
 readonly HARDENING_BACKUP_KEEP=5
 
-readonly FAIL2BAN_JAIL_FILE="/etc/fail2ban/jail.d/remnawave-audit.local"
+# Корень конфигов fail2ban — переопределяется для тестов, как REMNANODE_COMPOSE.
+: "${FAIL2BAN_DIR:=/etc/fail2ban}"
+readonly FAIL2BAN_JAIL_FILE="${FAIL2BAN_DIR}/jail.d/remnawave-audit.local"
 readonly UNATTENDED_FILE="/etc/apt/apt.conf.d/50unattended-upgrades"
 readonly AUTO_UPGRADES_FILE="/etc/apt/apt.conf.d/20auto-upgrades"
 
@@ -75,22 +77,57 @@ hardening_install_packages() {
 # UFW
 # ---------------------------------------------------------------------------
 
-# hardening_setup_ufw <ssh_port> <whitelist_csv> [rate_limit_flag]
+# Добавить одно allow-правило. source пустой / "Anywhere" → открыто миру.
+_ufw_allow_port() {
+  local port="$1" src="${2:-}" comment="${3:-audit-allow}"
+  if [[ -z "$src" || "$src" == "Anywhere" ]]; then
+    ufw allow "${port}/tcp" comment "$comment" >/dev/null
+  else
+    ufw allow from "$src" to any port "$port" proto tcp comment "$comment" >/dev/null
+  fi
+}
+
+# Source-IP, с которым порт должен быть открыт.
+# NODE_PORT_ALLOW_FROM ограничивает порт связи с панелью её IP — так же, как
+# это делается в ручном hardening'е. Для остальных портов — пусто (Anywhere).
+_ufw_desired_source() {
+  local port="$1"
+  if [[ -n "${NODE_PORT_ALLOW_FROM:-}" && -n "${NODE_PORT:-}" && "$port" == "${NODE_PORT}" ]]; then
+    printf '%s' "$NODE_PORT_ALLOW_FROM"
+  fi
+}
+
+# hardening_setup_ufw <ssh_port> <whitelist_csv> [rate_limit_flag] [mode]
+#
+# mode:
+#   preserve (default) — НИЧЕГО не удаляет. Выставляет политику по умолчанию
+#       и доносит только недостающие allow-правила. Порт, у которого уже есть
+#       правило (с любым source), не трогается вовсе — поэтому ручные
+#       ограничения вида `allow from <IP панели> to any port 2222` переживают
+#       установку без изменений.
+#   reset — полная пересборка (старое поведение). Source-IP существующих
+#       правил снимается ДО reset и восстанавливается после, чтобы пересборка
+#       не превращала port-restricted правило в открытое миру.
 hardening_setup_ufw() {
   local ssh_port="$1" whitelist_csv="$2" rate_limit="${3:-0}"
+  local mode="${4:-${HARDENING_UFW_MODE:-${UFW_MODE:-preserve}}}"
 
   if [[ -z "$ssh_port" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
-    log_error "ufw setup: некорректный SSH порт '${ssh_port}'"
+    abort_expected "ufw setup: некорректный SSH порт '${ssh_port}'"
     return 1
   fi
   if [[ -z "$whitelist_csv" ]]; then
-    log_error "ufw setup: пустой whitelist"
+    abort_expected "ufw setup: пустой whitelist"
+    return 1
+  fi
+  if [[ "$mode" != "preserve" && "$mode" != "reset" ]]; then
+    abort_expected "ufw setup: неизвестный UFW_MODE='${mode}' (ожидается preserve|reset)"
     return 1
   fi
 
   # === SANITY: SSH порт обязан быть в whitelist ===
   if ! _csv_contains "$whitelist_csv" "$ssh_port"; then
-    log_error "SSH порт ${ssh_port} НЕ в whitelist (${whitelist_csv}). UFW отрубит SSH-сессию. ABORT."
+    abort_expected "SSH порт ${ssh_port} НЕ в whitelist (${whitelist_csv}). UFW отрубит SSH-сессию. ABORT."
     return 1
   fi
 
@@ -100,38 +137,132 @@ hardening_setup_ufw() {
     log_info "Активная SSH-сессия: ${our_ip} → :${ssh_port}. SSH порт в allow — сессия не оборвётся."
   fi
 
-  # Защита от стирания «чужих» правил UFW.
-  # Логика: парсим текущие allow-порты. Если все они ∈ нашего whitelist —
-  # reset идемпотентен (мы пересоздадим те же allow). Если есть «лишние»
-  # (кастомные правила админа вне whitelist) — abort с явным указанием.
-  # HARDENING_UFW_FORCE_RESET=1 / --ufw-force-reset перебивают любую защиту.
+  local ufw_active=0
   if ufw status 2>/dev/null | head -1 | grep -q 'Status: active'; then
-    local existing extras=""
-    existing="$(ufw status 2>/dev/null \
-                  | awk '/ALLOW/ {p=$1; sub(/\/.*/,"",p); if (p ~ /^[0-9]+$/) print p}' \
-                  | sort -un | paste -sd, -)"
-    if [[ -n "$existing" ]]; then
-      local p
-      local IFS=','
-      for p in $existing; do
-        if ! _csv_contains "$whitelist_csv" "$p"; then
-          extras+="${p},"
-        fi
-      done
-      unset IFS
-      extras="${extras%,}"
-    fi
+    ufw_active=1
+  fi
 
-    if [[ -z "$extras" ]] && [[ -n "$existing" ]]; then
-      log_info "UFW уже active с правилами [${existing}] — все ∈ нашего whitelist, reset идемпотентен"
-    elif [[ -n "$extras" ]] && [[ "${HARDENING_UFW_FORCE_RESET:-0}" != "1" ]]; then
+  # Фиксируем ОДИН раз, при первой настройке: был ли firewall поднят до нас.
+  # Если был — rollback не имеет права его выключать (это не наш firewall).
+  if [[ -z "$(state_get 'hardening_ufw_preexisting' '')" ]]; then
+    state_set "hardening_ufw_preexisting" "$ufw_active"
+  fi
+
+  if [[ "$mode" == "preserve" ]]; then
+    _ufw_apply_preserve "$ssh_port" "$whitelist_csv" "$rate_limit" "$ufw_active" || return 1
+  else
+    _ufw_apply_reset "$ssh_port" "$whitelist_csv" "$rate_limit" "$ufw_active" || return 1
+  fi
+
+  state_set "hardening_ufw_managed" "1"
+  state_set "hardening_ufw_mode" "$mode"
+  return 0
+}
+
+# --- preserve: только дополняем, ничего не удаляем -------------------------
+_ufw_apply_preserve() {
+  local ssh_port="$1" whitelist_csv="$2" rate_limit="$3" ufw_active="$4"
+
+  if (( ufw_active == 1 )); then
+    log_info "UFW: режим preserve — существующие правила сохраняются, добавляю только недостающие"
+    local extras
+    extras="$(ports_ufw_extras_csv "$whitelist_csv")"
+    if [[ -n "$extras" ]]; then
+      log_info "UFW: правила вне whitelist оставлены нетронутыми: ${extras}"
+      log_info "     (чтобы мониторинг не считал их дрейфом — EXTRA_PORTS_WHITELIST=${extras})"
+    fi
+  else
+    log_info "UFW: неактивен — настраиваю с нуля (allow ${whitelist_csv})"
+  fi
+
+  ufw default deny incoming  >/dev/null 2>&1
+  ufw default allow outgoing >/dev/null 2>&1
+
+  # SSH — первым, чтобы enable ниже не оборвал сессию.
+  if ports_ufw_has_port "$ssh_port"; then
+    log_info "UFW: SSH ${ssh_port} уже разрешён — правило не трогаю"
+  elif [[ "$rate_limit" == "1" ]]; then
+    ufw limit "${ssh_port}/tcp" comment 'audit-ssh-rl' >/dev/null
+    log_info "UFW: + limit ${ssh_port}/tcp (SSH, rate-limit)"
+  else
+    ufw allow "${ssh_port}/tcp" comment 'audit-ssh' >/dev/null
+    log_info "UFW: + allow ${ssh_port}/tcp (SSH)"
+  fi
+
+  local p src added=0 kept=0
+  local IFS=','
+  for p in $whitelist_csv; do
+    [[ -z "$p" || "$p" == "$ssh_port" ]] && continue
+    [[ "$p" =~ ^[0-9]+$ ]] || continue
+    if ports_ufw_has_port "$p"; then
+      kept=$((kept + 1))
+      continue
+    fi
+    src="$(_ufw_desired_source "$p")"
+    _ufw_allow_port "$p" "$src" 'audit-allow'
+    if [[ -n "$src" ]]; then
+      log_info "UFW: + allow from ${src} to any port ${p}/tcp"
+    else
+      log_info "UFW: + allow ${p}/tcp"
+    fi
+    added=$((added + 1))
+  done
+  unset IFS
+
+  if (( ufw_active == 0 )); then
+    ufw --force enable >/dev/null
+  fi
+
+  log_info "UFW активен (preserve). Добавлено правил: ${added}, оставлено без изменений: ${kept}"
+
+  # Предупреждаем, если порт панели остался открытым миру, хотя мог бы быть
+  # ограничен IP панели — это ровно та дыра, которую закрывает ручной hardening.
+  if [[ -n "${NODE_PORT:-}" ]] && [[ -z "${NODE_PORT_ALLOW_FROM:-}" ]]; then
+    local cur_src
+    cur_src="$(ports_ufw_source_for "$NODE_PORT")"
+    if [[ -z "$cur_src" ]]; then
+      log_warn "NODE_PORT ${NODE_PORT} открыт всему интернету. Безопаснее ограничить IP панели:"
+      log_warn "  NODE_PORT_ALLOW_FROM=<IP панели> в ${CONFIG_PATH:-/etc/remnawave-audit/audit.conf}"
+    else
+      log_info "NODE_PORT ${NODE_PORT} ограничен source ${cur_src} — сохранено"
+    fi
+  fi
+  return 0
+}
+
+# --- reset: полная пересборка, с переносом source-IP -----------------------
+_ufw_apply_reset() {
+  local ssh_port="$1" whitelist_csv="$2" rate_limit="$3" ufw_active="$4"
+
+  # Снимаем карту port→source ДО reset: иначе port-restricted правила
+  # пересоздадутся как открытые миру.
+  declare -A saved_src=()
+  local port from
+  while IFS='|' read -r port _ from _; do
+    [[ -z "$port" ]] && continue
+    [[ "$from" == "Anywhere" || -z "$from" ]] && continue
+    [[ -n "${saved_src[$port]:-}" ]] && continue
+    saved_src["$port"]="$from"
+  done < <(ports_ufw_rules)
+
+  if (( ufw_active == 1 )); then
+    local extras
+    extras="$(ports_ufw_extras_csv "$whitelist_csv")"
+
+    if [[ -z "$extras" ]]; then
+      log_info "UFW active, все правила ∈ whitelist — reset идемпотентен"
+    elif [[ "${HARDENING_UFW_FORCE_RESET:-0}" != "1" ]]; then
       log_error "UFW активен с правилами вне нашего whitelist: ${extras}"
       ufw status 2>/dev/null | head -20 >&2
-      log_error "Reset снесёт эти правила. Если они не нужны — установи HARDENING_UFW_FORCE_RESET=1"
-      log_error "(или флаг --ufw-force-reset). Иначе добавь порты в EXTRA_PORTS_WHITELIST конфига."
+      log_error "Режим reset снесёт эти правила."
+      log_error "Варианты:"
+      log_error "  1. UFW_MODE=preserve (по умолчанию) — дополнить, ничего не удаляя;"
+      log_error "  2. EXTRA_PORTS_WHITELIST=${extras} в конфиге — пересоздать их вместе с остальными;"
+      log_error "  3. --ufw-force-reset / HARDENING_UFW_FORCE_RESET=1 — снести осознанно."
       log_error "Snapshot правил уже в backup'е."
+      abort_expected ""
       return 1
-    elif [[ -n "$extras" ]]; then
+    else
       log_warn "HARDENING_UFW_FORCE_RESET=1 — сношу правила ${extras} (вне whitelist)"
     fi
   fi
@@ -142,37 +273,97 @@ hardening_setup_ufw() {
   ufw default deny incoming  >/dev/null 2>&1
   ufw default allow outgoing >/dev/null 2>&1
 
-  # SSH правило — первым; опционально с rate-limit.
+  # SSH правило — первым; опционально с rate-limit. SSH никогда не ограничиваем
+  # по source автоматически: ошибка тут стоит потери доступа к серверу.
   if [[ "$rate_limit" == "1" ]]; then
     ufw limit "${ssh_port}/tcp" comment 'audit-ssh-rl' >/dev/null
   else
     ufw allow "${ssh_port}/tcp" comment 'audit-ssh' >/dev/null
   fi
 
-  local p
+  local p src
   local IFS=','
   for p in $whitelist_csv; do
     [[ -z "$p" || "$p" == "$ssh_port" ]] && continue
     [[ "$p" =~ ^[0-9]+$ ]] || continue
-    ufw allow "${p}/tcp" comment 'audit-allow' >/dev/null
+    # Явная настройка важнее того, что было; иначе восстанавливаем прежний source.
+    src="$(_ufw_desired_source "$p")"
+    [[ -z "$src" ]] && src="${saved_src[$p]:-}"
+    _ufw_allow_port "$p" "$src" 'audit-allow'
+    [[ -n "$src" ]] && log_info "UFW: ${p}/tcp ограничен source ${src} (сохранено при пересборке)"
   done
   unset IFS
 
   ufw --force enable >/dev/null
-  state_set "hardening_ufw_managed" "1"
-  log_info "UFW активен. Allow: ${whitelist_csv}"
+  log_info "UFW активен (reset). Allow: ${whitelist_csv}"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
 # fail2ban
 # ---------------------------------------------------------------------------
 
-# hardening_setup_fail2ban <ssh_port> [admin_ips_csv]
+# Путь к ЧУЖОМУ конфигу, объявляющему [sshd] jail (не нашему). Пусто — нет такого.
+#
+# Важно: fail2ban склеивает jail.local и jail.d/* в алфавитном порядке, и
+# последний прочитанный файл переопределяет предыдущие. Наш
+# `remnawave-audit.local` идёт раньше типичного `sshd.local`, поэтому чужой
+# конфиг молча выигрывает. Тихо писать свой файл поверх — значит создать
+# иллюзию управления настройками, которые на деле не применяются.
+_fail2ban_foreign_sshd_jail() {
+  local f
+  for f in "${FAIL2BAN_DIR}/jail.local" "${FAIL2BAN_DIR}"/jail.d/*.conf "${FAIL2BAN_DIR}"/jail.d/*.local; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == "$FAIL2BAN_JAIL_FILE" ]] && continue
+    if grep -qE '^\[sshd\]' "$f" 2>/dev/null; then
+      printf '%s' "$f"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# hardening_setup_fail2ban <ssh_port> [admin_ips_csv] [mode]
+#
+# mode:
+#   preserve (default) — если [sshd] jail уже настроен админом, свой конфиг
+#       не пишем: проверяем, что сервис включён, и оставляем как есть.
+#   manage — всегда писать свой jail (перетирает наш прежний файл; чужой
+#       файл при этом всё равно может выиграть по приоритету — предупредим).
 hardening_setup_fail2ban() {
   local ssh_port="$1" admin_ips_csv="${2:-}"
+  local mode="${3:-${HARDENING_FAIL2BAN_MODE:-${FAIL2BAN_MODE:-preserve}}}"
   if [[ -z "$ssh_port" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
     log_error "fail2ban setup: некорректный SSH порт '${ssh_port}'"
     return 1
+  fi
+
+  local foreign
+  foreign="$(_fail2ban_foreign_sshd_jail)"
+
+  if [[ -n "$foreign" ]]; then
+    if [[ "$mode" == "preserve" ]]; then
+      log_info "fail2ban: [sshd] jail уже настроен в ${foreign} — оставляю как есть (FAIL2BAN_MODE=preserve)"
+      # Наш jail мог остаться от установки в режиме manage. Не удаляем его молча
+      # (это чужое решение админа), но и не даём забыть о двух источниках правды.
+      if [[ -f "$FAIL2BAN_JAIL_FILE" ]]; then
+        log_warn "fail2ban: от прошлой установки остался ${FAIL2BAN_JAIL_FILE}"
+        log_warn "  Действуют оба файла; при конфликте ключей выигрывает ${foreign}."
+        log_warn "  Убрать наш: rm ${FAIL2BAN_JAIL_FILE} && systemctl reload fail2ban"
+      fi
+      systemctl enable fail2ban >/dev/null 2>&1 || true
+      systemctl is-active --quiet fail2ban || systemctl start fail2ban >/dev/null 2>&1 || true
+      if systemctl is-active --quiet fail2ban; then
+        log_info "fail2ban: сервис активен, чужой jail не тронут"
+      else
+        log_warn "fail2ban: сервис не запустился — проверь ${foreign} (fail2ban-client status sshd)"
+      fi
+      state_set "hardening_fail2ban_managed" "0"
+      return 0
+    fi
+    log_warn "fail2ban: [sshd] jail также объявлен в ${foreign}."
+    log_warn "  fail2ban читает jail.d по алфавиту — при конфликте выигрывает файл с именем позже."
+    log_warn "  Наш файл: ${FAIL2BAN_JAIL_FILE}. Сверь итог: fail2ban-client get sshd maxretry"
   fi
 
   local ignoreip="127.0.0.1/8 ::1"
@@ -405,6 +596,8 @@ hardening_run() {
   is_root || { log_error "hardening требует root"; return 1; }
 
   local skip_ufw=0 skip_f2b=0 skip_unat=0 skip_ntp=0 ufw_rl=0
+  local ufw_mode="${HARDENING_UFW_MODE:-${UFW_MODE:-preserve}}"
+  local f2b_mode="${HARDENING_FAIL2BAN_MODE:-${FAIL2BAN_MODE:-preserve}}"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --skip-ufw)        skip_ufw=1 ;;
@@ -412,6 +605,8 @@ hardening_run() {
       --skip-unattended) skip_unat=1 ;;
       --skip-ntp)        skip_ntp=1 ;;
       --ufw-rate-limit)  ufw_rl=1 ;;
+      --ufw-mode=*)      ufw_mode="${1#*=}" ;;
+      --fail2ban-mode=*) f2b_mode="${1#*=}" ;;
     esac
     shift
   done
@@ -425,13 +620,13 @@ hardening_run() {
     local ssh_port whitelist
     ssh_port="$(ports_sshd_port)"
     whitelist="$(ports_full_whitelist_csv)"
-    hardening_setup_ufw "$ssh_port" "$whitelist" "$ufw_rl" || return 1
+    hardening_setup_ufw "$ssh_port" "$whitelist" "$ufw_rl" "$ufw_mode" || return 1
   else
     log_info "UFW: пропуск (--skip-ufw)"
   fi
 
   if (( skip_f2b == 0 )); then
-    hardening_setup_fail2ban "$(ports_sshd_port)" "${SSH_ADMIN_IPS:-}"
+    hardening_setup_fail2ban "$(ports_sshd_port)" "${SSH_ADMIN_IPS:-}" "$f2b_mode"
   else
     log_info "fail2ban: пропуск (--skip-fail2ban)"
   fi
@@ -466,8 +661,18 @@ hardening_rollback() {
   local force=0
   [[ "${1:-}" == "--yes" ]] && force=1
 
+  # UFW, поднятый админом до установки, откатом не выключаем — мы его не
+  # включали. Иначе «откат нашего скрипта» снимает чужую защиту с сервера.
+  local ufw_preexisting
+  ufw_preexisting="$(state_get 'hardening_ufw_preexisting' '0')"
+
   printf '\n=== Hardening rollback (soft) ===\n'
-  printf 'Будет: ufw disable, удалить %s, перезапустить fail2ban.\n' "$FAIL2BAN_JAIL_FILE"
+  if [[ "$ufw_preexisting" == "1" ]]; then
+    printf 'UFW был активен ДО установки — остаётся включённым (не наш firewall).\n'
+  else
+    printf 'Будет: ufw disable.\n'
+  fi
+  printf 'Будет: удалить %s, перезапустить fail2ban.\n' "$FAIL2BAN_JAIL_FILE"
   printf 'unattended-upgrades НЕ откатывается (безопасный конфиг).\n'
   printf 'Полные snapshot-ы: %s\n\n' "$HARDENING_BACKUP_ROOT"
 
@@ -478,8 +683,14 @@ hardening_rollback() {
   fi
 
   if command -v ufw >/dev/null 2>&1; then
-    ufw --force disable >/dev/null 2>&1 || true
-    log_info "ufw disabled"
+    if [[ "$ufw_preexisting" == "1" ]]; then
+      log_info "ufw оставлен включённым (был активен до установки)"
+      log_info "Наши правила помечены комментарием audit-allow / audit-ssh — удали вручную при необходимости:"
+      log_info "  ufw status numbered | grep audit-"
+    else
+      ufw --force disable >/dev/null 2>&1 || true
+      log_info "ufw disabled"
+    fi
   fi
 
   if [[ -f "$FAIL2BAN_JAIL_FILE" ]]; then

@@ -81,13 +81,41 @@ Offline queue если Telegram временно недоступен. Лока�
 
 | Модуль | Что делает | Защита |
 |---|---|---|
-| **UFW** | default deny incoming, allow [SSH из sshd_config + NODE_PORT + INBOUND_PORTS + EXTRA] | sanity-check SSH в whitelist перед `ufw enable`; subset-проверка существующих правил |
-| **fail2ban** | jail [sshd], bantime 1h, maxretry 5, ignoreip из SSH_ADMIN_IPS | защита от bruteforce |
+| **UFW** | default deny incoming, allow [SSH из sshd_config + NODE_PORT + INBOUND_PORTS + EXTRA] | sanity-check SSH в whitelist перед `ufw enable`; по умолчанию правила только дополняются |
+| **fail2ban** | jail [sshd], bantime 1h, maxretry 5, ignoreip из SSH_ADMIN_IPS | защита от bruteforce; чужой jail по умолчанию не трогается |
 | **unattended-upgrades** | только `-security`, без auto-reboot | автопатчи без сюрпризов |
 | **NTP** | timedatectl set-ntp → fallback chrony+NTS (TCP/443) → fallback htpdate (HTTPS) | работает даже на VPS с заблокированным UDP/123 |
 
 Перед изменениями делается snapshot в `/var/lib/remnawave-audit/backup/<ts>/` (iptables, fail2ban, sshd_config, apt configs).
 Откат: `sudo remnawave-audit --rollback`.
+
+### Установка на сервер с уже настроенной безопасностью
+
+Если UFW и fail2ban уже настроены вручную, установка их **не переопределяет**:
+
+- **`UFW_MODE=preserve`** (по умолчанию) — существующие правила не удаляются, добавляются
+  только недостающие. Порт, у которого уже есть правило, не трогается вовсе — поэтому
+  ограничения вида `ufw allow from <IP панели> to any port 2222` переживают установку.
+- **Перенимание настроек** — установщик считывает с сервера и записывает в конфиг:
+  порты, открытые в UFW вне whitelist (→ `EXTRA_PORTS_WHITELIST`), ограничение порта
+  панели по source-IP (→ `NODE_PORT_ALLOW_FROM`), `ignoreip` из чужих fail2ban-jail'ов
+  (→ `SSH_ADMIN_IPS`). Отключается флагом `--no-adopt`.
+- **`FAIL2BAN_MODE=preserve`** (по умолчанию) — если `[sshd]` jail уже объявлен админом,
+  свой конфиг не пишется. Иначе он всё равно был бы перекрыт: fail2ban читает `jail.d`
+  по алфавиту, и `sshd.local` выигрывает у `remnawave-audit.local`.
+- **Откат** не выключает UFW, если тот был активен до установки.
+
+`UFW_MODE=reset` пересобирает список правил с нуля. Даже в этом режиме source-IP
+существующих правил снимается до `reset` и восстанавливается после — пересборка
+не превращает port-restricted правило в открытое миру.
+
+Неинтерактивная установка на такую ноду:
+
+```bash
+sudo /opt/remnawave-audit/install.sh --non-interactive \
+  --bot-token=123:AAA --admin-id=12345 --node-name=Finland2 --tz=Europe/Berlin \
+  --node-port-allow-from=<IP панели>
+```
 
 ## Что НЕ делает
 

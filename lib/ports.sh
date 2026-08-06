@@ -109,6 +109,100 @@ ports_ufw_allow() {
     | sort -un || true
 }
 
+# Полный разбор allow-правил UFW со ЗНАЧЕНИЕМ source.
+# Формат вывода (по строке на правило):  port|proto|from|comment
+#   from == "Anywhere" — правило открыто миру
+#   from == "155.212.132.159" / "10.0.0.0/8" — правило ограничено по source
+#
+# Зачем: ports_ufw_allow() отдаёт только номера портов, и по нему невозможно
+# отличить `allow 2222/tcp` (открыт всем) от
+# `allow from <IP панели> to any port 2222` (ограничен). Без этого различия
+# любая пересборка UFW молча снимает ограничение по IP.
+#
+# v6-дубли схлопываются: `22/tcp (v6)` и `22/tcp` — одно логическое правило.
+ports_ufw_rules() {
+  command -v ufw >/dev/null 2>&1 || return 0
+  ufw status 2>/dev/null | awk '
+    {
+      line = $0
+      comment = ""
+      h = index(line, "#")
+      if (h > 0) {
+        comment = substr(line, h + 1)
+        line = substr(line, 1, h - 1)
+        gsub(/^[ \t]+|[ \t]+$/, "", comment)
+      }
+      gsub(/\(v6\)/, "", line)
+
+      n = split(line, f, " ")
+      ai = 0
+      for (k = 1; k <= n; k++) if (f[k] == "ALLOW") { ai = k; break }
+      if (ai == 0) next
+
+      to = f[1]
+      port = to; proto = "any"
+      s = index(to, "/")
+      if (s > 0) { port = substr(to, 1, s - 1); proto = substr(to, s + 1) }
+      if (port !~ /^[0-9]+$/) next
+
+      fi = ai + 1
+      if (f[fi] == "IN" || f[fi] == "OUT") fi++
+      from = (fi <= n && f[fi] != "") ? f[fi] : "Anywhere"
+
+      print port "|" proto "|" from "|" comment
+    }' | sort -u || true
+}
+
+# Есть ли в UFW хоть одно allow-правило на порт (с любым source)?
+# Порт «покрыт» — трогать его не нужно, даже если source отличается от нашего.
+ports_ufw_has_port() {
+  local port="$1"
+  [[ -n "$port" ]] || return 1
+  ports_ufw_rules | awk -F'|' -v p="$port" '$1 == p {found=1} END {exit !found}'
+}
+
+# Source-IP для порта: первый не-Anywhere source среди правил этого порта.
+# Пусто — если правил нет или все открыты миру.
+ports_ufw_source_for() {
+  local port="$1"
+  [[ -n "$port" ]] || return 0
+  ports_ufw_rules \
+    | awk -F'|' -v p="$port" '$1 == p && $3 != "Anywhere" && $3 != "" {print $3; exit}'
+}
+
+# Порты, открытые в UFW, но отсутствующие в переданном whitelist (CSV).
+ports_ufw_extras_csv() {
+  local whitelist="$1" out="" p
+  local existing
+  existing="$(ports_ufw_allow | _to_csv)"
+  [[ -n "$existing" ]] || return 0
+  local IFS=','
+  for p in $existing; do
+    [[ -z "$p" ]] && continue
+    if ! _csv_contains "$whitelist" "$p"; then
+      out+="${p},"
+    fi
+  done
+  unset IFS
+  printf '%s' "${out%,}"
+}
+
+# ignoreip из ЧУЖИХ fail2ban-конфигов (jail.local + jail.d/*, кроме нашего).
+# Нужно, чтобы установка переняла уже внесённые админом доверенные IP,
+# а не сузила их до дефолта.
+ports_fail2ban_ignoreip() {
+  local f out=""
+  local f2b_dir="${FAIL2BAN_DIR:-/etc/fail2ban}"
+  for f in "${f2b_dir}/jail.local" "${f2b_dir}"/jail.d/*.conf "${f2b_dir}"/jail.d/*.local; do
+    [[ -f "$f" ]] || continue
+    [[ "$f" == "${f2b_dir}/jail.d/remnawave-audit.local" ]] && continue
+    out+="$(awk -F'=' '/^[[:space:]]*ignoreip[[:space:]]*=/ {print $2}' "$f" 2>/dev/null || true) "
+  done
+  # Отбрасываем loopback — он и так всегда в нашем ignoreip.
+  printf '%s' "$out" | tr ' ' '\n' | awk 'NF' \
+    | grep -vE '^(127\.|::1$|127\.0\.0\.1/8$)' | sort -u | paste -sd, - || true
+}
+
 # CSV из значения функции, печатающей построчно.
 _to_csv() { paste -sd, - ; }
 
@@ -344,18 +438,52 @@ ports_sync_interactive() {
 # Port wizard (для install.sh)
 # ---------------------------------------------------------------------------
 
+# IP или CIDR (v4/v6, грубая проверка — достаточно чтобы отсечь опечатки).
+_is_ip_or_cidr() {
+  [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] && return 0
+  [[ "$1" =~ ^[0-9a-fA-F:]+(/[0-9]{1,3})?$ && "$1" == *:* ]] && return 0
+  return 1
+}
+
+# Каждый элемент CSV — валидный IP/CIDR.
+_csv_all_ips() {
+  local v
+  local IFS=','
+  for v in $1; do
+    [[ -z "$v" ]] && continue
+    _is_ip_or_cidr "$v" || return 1
+  done
+  unset IFS
+  return 0
+}
+
 # ports_wizard
-# Интерактивно собирает NODE_PORT и INBOUND_PORTS. Экспортирует:
-#   WIZARD_NODE_PORT, WIZARD_INBOUND_PORTS, WIZARD_FULL_WHITELIST
+# Интерактивно собирает параметры портов и — что важнее — ПЕРЕНИМАЕТ уже
+# настроенную на сервере безопасность: существующие правила UFW (включая
+# ограничения по source-IP) и ignoreip из чужих fail2ban jail'ов.
+# Экспортирует:
+#   WIZARD_NODE_PORT, WIZARD_INBOUND_PORTS, WIZARD_EXTRA_PORTS,
+#   WIZARD_NODE_PORT_ALLOW_FROM, WIZARD_SSH_ADMIN_IPS,
+#   WIZARD_UFW_MODE, WIZARD_FULL_WHITELIST
 ports_wizard() {
   local ssh_port compose_port default_node
   ssh_port="$(ports_sshd_port)"
   compose_port="$(ports_compose_node_port)"
   default_node="${compose_port:-2222}"
 
-  printf '\n[1/3] SSH-порт из sshd_config: %s — будет открыт в UFW.\n' "$ssh_port"
+  WIZARD_EXTRA_PORTS=""
+  WIZARD_NODE_PORT_ALLOW_FROM=""
+  WIZARD_SSH_ADMIN_IPS=""
+  WIZARD_UFW_MODE="preserve"
 
-  printf '[2/3] NODE_PORT (связь с панелью): %s\n' "$default_node"
+  local ufw_active=0
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -1 | grep -q 'Status: active'; then
+    ufw_active=1
+  fi
+
+  printf '\n[1/5] SSH-порт из sshd_config: %s — будет открыт в UFW.\n' "$ssh_port"
+
+  printf '[2/5] NODE_PORT (связь с панелью): %s\n' "$default_node"
   printf '      Использовать его? [Y/n]: '
   local reply
   read -r reply
@@ -370,16 +498,39 @@ ports_wizard() {
     return 1
   fi
 
+  # Ограничение порта панели по source-IP. Если админ уже настроил такое
+  # правило руками — подставляем его значение, чтобы установка не ослабила
+  # доступ, расширив правило до Anywhere.
+  local detected_src
+  detected_src="$(ports_ufw_source_for "$WIZARD_NODE_PORT")"
+  if [[ -n "$detected_src" ]]; then
+    printf '      В UFW порт %s уже ограничен source: %s\n' "$WIZARD_NODE_PORT" "$detected_src"
+    printf '      Сохранить это ограничение? [Y/n]: '
+    read -r reply
+    if [[ "$reply" == "n" || "$reply" == "N" ]]; then
+      WIZARD_NODE_PORT_ALLOW_FROM=""
+    else
+      WIZARD_NODE_PORT_ALLOW_FROM="$detected_src"
+    fi
+  else
+    printf '      IP панели для ограничения доступа к порту %s (Enter — открыть всем): ' "$WIZARD_NODE_PORT"
+    read -r WIZARD_NODE_PORT_ALLOW_FROM
+    if [[ -n "$WIZARD_NODE_PORT_ALLOW_FROM" ]] && ! _is_ip_or_cidr "$WIZARD_NODE_PORT_ALLOW_FROM"; then
+      log_error "Не похоже на IP/CIDR: ${WIZARD_NODE_PORT_ALLOW_FROM}"
+      return 1
+    fi
+  fi
+
   # Пытаемся определить реальные порты xray, исключая NODE_PORT.
   local detected_inbound default_inbound
   detected_inbound="$(ports_listening_xray 2>/dev/null \
     | grep -v "^${WIZARD_NODE_PORT}$" | _to_csv || true)"
   if [[ -n "$detected_inbound" ]]; then
     default_inbound="$detected_inbound"
-    printf '[3/3] Обнаруженные порты инбаундов xray: %s\n' "$default_inbound"
+    printf '[3/5] Обнаруженные порты инбаундов xray: %s\n' "$default_inbound"
   else
     default_inbound="443"
-    printf '[3/3] Порты инбаундов xray (не удалось определить автоматически): %s\n' "$default_inbound"
+    printf '[3/5] Порты инбаундов xray (не удалось определить автоматически): %s\n' "$default_inbound"
   fi
   printf '      [s] Использовать обнаруженные (%s)\n' "$default_inbound"
   printf '      [c] Ввести свои\n'
@@ -403,9 +554,84 @@ ports_wizard() {
   esac
   WIZARD_INBOUND_PORTS="$(_csv_normalize "$WIZARD_INBOUND_PORTS")"
 
-  WIZARD_FULL_WHITELIST="$(_csv_normalize "${ssh_port},${WIZARD_NODE_PORT},${WIZARD_INBOUND_PORTS}")"
+  # --- Уже открытые в UFW порты, не попавшие в наш whitelist ---
+  # Раньше они всплывали только на этапе hardening'а — как ошибка, обрывающая
+  # установку. Правильное место разобраться с ними — здесь, до записи конфига.
+  # Порты вроде 80 (nginx front) или 8444 (XHTTP) не видны через docker top,
+  # поэтому автоопределение инбаундов их принципиально не находит.
+  local base_wl known_extras
+  base_wl="$(_csv_normalize "${ssh_port},${WIZARD_NODE_PORT},${WIZARD_INBOUND_PORTS}")"
+  known_extras="$(ports_ufw_extras_csv "$base_wl")"
 
-  printf '\nИтоговый allow-list UFW: %s\n' "$WIZARD_FULL_WHITELIST"
+  printf '[4/5] Дополнительные порты (не инбаунды xray)\n'
+  if [[ -n "$known_extras" ]]; then
+    printf '      В UFW уже открыты и не учтены выше: %s\n' "$known_extras"
+    printf '      Обычно это nginx/фронт (80), XHTTP (8444) и подобное.\n'
+    printf '      Записать их в EXTRA_PORTS_WHITELIST? [Y/n]: '
+    read -r reply
+    if [[ "$reply" == "n" || "$reply" == "N" ]]; then
+      printf '      Свой список (CSV, Enter — пусто): '
+      read -r WIZARD_EXTRA_PORTS
+    else
+      WIZARD_EXTRA_PORTS="$known_extras"
+    fi
+  else
+    printf '      Не обнаружено. Доп. порты (CSV, Enter — пропустить): '
+    read -r WIZARD_EXTRA_PORTS
+  fi
+  WIZARD_EXTRA_PORTS="$(_csv_normalize "$WIZARD_EXTRA_PORTS")"
+
+  # --- Режим применения UFW ---
+  printf '[5/5] Режим UFW\n'
+  if (( ufw_active == 1 )); then
+    printf '      UFW уже активен. Как применять правила?\n'
+    printf '      [p] preserve — только добавить недостающее, ничего не удалять (рекомендуется)\n'
+    printf '      [r] reset    — пересобрать список правил с нуля\n'
+    printf '      Выбор [p/r, default p]: '
+    read -r choice
+    case "${choice:-p}" in
+      r|R) WIZARD_UFW_MODE="reset" ;;
+      *)   WIZARD_UFW_MODE="preserve" ;;
+    esac
+  else
+    printf '      UFW неактивен — правила будут созданы с нуля.\n'
+    WIZARD_UFW_MODE="preserve"
+  fi
+
+  # --- Доверенные IP для fail2ban ---
+  local detected_ignore
+  detected_ignore="$(ports_fail2ban_ignoreip)"
+  if [[ -n "$detected_ignore" ]]; then
+    printf '\n      В fail2ban уже доверены IP: %s\n' "$detected_ignore"
+    printf '      Перенести в SSH_ADMIN_IPS (не считать их брутфорсом)? [Y/n]: '
+    read -r reply
+    if [[ "$reply" != "n" && "$reply" != "N" ]]; then
+      WIZARD_SSH_ADMIN_IPS="$detected_ignore"
+    fi
+  else
+    printf '\n      Админские IP через запятую (Enter — пропустить): '
+    read -r WIZARD_SSH_ADMIN_IPS
+    if [[ -n "$WIZARD_SSH_ADMIN_IPS" ]] && ! _csv_all_ips "$WIZARD_SSH_ADMIN_IPS"; then
+      log_error "SSH_ADMIN_IPS: ожидается CSV из IP/CIDR, получено: ${WIZARD_SSH_ADMIN_IPS}"
+      return 1
+    fi
+  fi
+
+  WIZARD_FULL_WHITELIST="$(_csv_normalize \
+    "${ssh_port},${WIZARD_NODE_PORT},${WIZARD_INBOUND_PORTS},${WIZARD_EXTRA_PORTS}")"
+
+  printf '\n--- Итог ---\n'
+  printf 'Allow-list UFW:      %s\n' "$WIZARD_FULL_WHITELIST"
+  printf 'Режим UFW:           %s\n' "$WIZARD_UFW_MODE"
+  if [[ -n "$WIZARD_NODE_PORT_ALLOW_FROM" ]]; then
+    printf 'Порт панели %-8s только с %s\n' "$WIZARD_NODE_PORT" "$WIZARD_NODE_PORT_ALLOW_FROM"
+  else
+    printf 'Порт панели %-8s открыт всем\n' "$WIZARD_NODE_PORT"
+  fi
+  printf 'Доверенные IP:       %s\n' "${WIZARD_SSH_ADMIN_IPS:-—}"
+  if [[ "$WIZARD_UFW_MODE" == "preserve" ]] && (( ufw_active == 1 )); then
+    printf '\nСуществующие правила UFW не будут удалены.\n'
+  fi
   printf 'Сохранить и применить? [Y/n]: '
   read -r reply
   [[ "$reply" == "n" || "$reply" == "N" ]] && return 1

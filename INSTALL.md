@@ -23,6 +23,8 @@ sudo /opt/remnawave-audit/install.sh
 - `NODE_NAME` (например `Finland2`)
 - `TZ` (например `Europe/Moscow`)
 - порты (с дефолтами из `docker-compose.yml`: SSH, NODE_PORT, инбаунды 443/8388)
+- ограничение порта панели по IP, дополнительные порты, режим UFW — с
+  подстановкой того, что уже настроено на сервере
 
 Можно сразу неинтерактивно:
 
@@ -33,6 +35,32 @@ sudo /opt/remnawave-audit/install.sh \
   --node-name=Finland2 \
   --tz=Europe/Moscow
 ```
+
+## Нода с уже настроенным вручную UFW / fail2ban
+
+Установка ничего не ломает и ничего не спрашивает — существующие правила
+сохраняются, а недостающие данные считываются с сервера:
+
+```bash
+sudo /opt/remnawave-audit/install.sh --non-interactive \
+  --bot-token=123:AAA --admin-id=12345 --node-name=Finland2 --tz=Europe/Berlin \
+  --node-port-allow-from=155.212.132.159
+```
+
+Что произойдёт:
+
+| Уже настроено на сервере | Результат установки |
+|---|---|
+| `ufw allow 80/tcp`, `ufw allow 8444/tcp` | сохранены, записаны в `EXTRA_PORTS_WHITELIST` |
+| `ufw allow from <IP> to any port 2222` | сохранено, записано в `NODE_PORT_ALLOW_FROM` |
+| `jail.d/sshd.local` с `[sshd]` | не тронут, `ignoreip` перенесён в `SSH_ADMIN_IPS` |
+| `PasswordAuthentication no` в sshd | не трогается (скрипт вообще не правит sshd) |
+
+Проверить результат до применения — `--no-adopt` отключает перенимание,
+`--ufw-mode=reset` включает старое поведение с полной пересборкой правил.
+
+После установки сверь: `sudo ufw status numbered` и
+`sudo /opt/remnawave-audit/audit.sh --show-ports`.
 
 ## Что произойдёт
 

@@ -14,9 +14,23 @@ _log() {
   printf '%(%Y-%m-%dT%H:%M:%S%z)T [%s] %s\n' -1 "$level" "$msg" >&2
 }
 
+# Контролируемый отказ: сработал guard, а не баг. Ставит флаг, чтобы trap ERR
+# не выводил «Unexpected error at line N» — иначе осознанный abort выглядит
+# как падение скрипта и админ ищет ошибку там, где её нет.
+# Использование:  some_check || { abort_expected "причина"; return 1; }
+abort_expected() {
+  AUDIT_EXPECTED_ABORT=1
+  [[ -n "$*" ]] && log_error "$*"
+  return 1
+}
+
 on_error() {
   local exit_code="$1"
   local line_no="$2"
+  if [[ "${AUDIT_EXPECTED_ABORT:-0}" == "1" ]]; then
+    log_error "Прервано осознанно (см. сообщение выше). Изменения не применены."
+    return 0
+  fi
   log_error "Unexpected error at line ${line_no} (exit ${exit_code})"
 }
 

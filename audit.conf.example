@@ -20,6 +20,19 @@ EXTRA_PORTS_WHITELIST=        # доп. порты, не относящиеся 
 
 # --- Безопасность ---
 SSH_ADMIN_IPS=                # CSV админских IP — попытки логина с этих IP не считать за brute
+NODE_PORT_ALLOW_FROM=         # IP/CIDR панели: NODE_PORT будет открыт только с него (пусто = всем)
+
+# Как применять правила UFW:
+#   preserve — (default) добавить недостающие allow, НИЧЕГО не удалять.
+#              Ручные правила (в т.ч. `allow from <IP> to any port N`) сохраняются.
+#   reset    — пересобрать список правил с нуля. Порты вне whitelist будут снесены,
+#              поэтому требует либо полного EXTRA_PORTS_WHITELIST, либо --ufw-force-reset.
+UFW_MODE=preserve
+
+# Как обращаться с fail2ban:
+#   preserve — (default) если [sshd] jail уже настроен админом, свой не писать.
+#   manage   — управлять jail'ом самому (/etc/fail2ban/jail.d/remnawave-audit.local).
+FAIL2BAN_MODE=preserve
 
 # --- Опц. auto-recovery ---
 AUTO_RECOVER=0                # 1 = пытаться docker compose up -d при CRIT container_status (max 3/час)
